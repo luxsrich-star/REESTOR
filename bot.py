@@ -225,7 +225,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == "📋 История":
         await cmd_history(update, context)
         return
-        elif text == "🗑 Очистить":
+    elif text == "🗑 Очистить":
         result = delete_last_record()
         if result:
             await update.message.reply_text(f"🗑 Удалена последняя запись: {result}. Остаток на сайте восстановлен.")

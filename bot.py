@@ -40,7 +40,7 @@ user_states = {}  # chat_id -> {"state": "...", "data": {...}}
 def main_keyboard():
     return ReplyKeyboardMarkup([
         [KeyboardButton("📦 Остатки"), KeyboardButton("💰 Прибыль")],
-        [KeyboardButton("📋 История")]
+        [KeyboardButton("📋 История"), KeyboardButton("🗑 Очистить")]
     ], resize_keyboard=True)
 
 # ========== ЗАГРУЗКА СИНОНИМОВ ==========
@@ -145,6 +145,51 @@ def write_to_sheets(data, site_data):
     client = data.get("клиент") or ""
     profit_val = ((price - cost) * qty) if (cost and data["операция"] == "Продажа") else ""
     ws_history.append_row([today, data["операция"], data["товар"], price, qty, data["поставка"], client, profit_val])
+    # ========== УДАЛЕНИЕ ПОСЛЕДНЕЙ ЗАПИСИ ==========
+def delete_last_record():
+    # Найти последнюю строку в ИСТОРИИ
+    rows = ws_history.get_all_values()
+    last_row = None
+    for row in reversed(rows):
+        if row and row[0]:
+            last_row = row
+            break
+    if not last_row:
+        return None
+    
+    # last_row = [Дата, Операция, Товар, Цена, Кол-во, Поставка, Клиент, Прибыль]
+    operation = last_row[1]
+    product_name = last_row[2]
+    qty = int(last_row[4]) if last_row[4] else 1
+    
+    # Удалить последнюю строку в ИСТОРИИ
+    all_history = ws_history.get_all_values()
+    for i in range(len(all_history) - 1, 0, -1):
+        if all_history[i] and all_history[i][0]:
+            ws_history.delete_rows(i + 1)
+            break
+    
+    # Удалить последнюю строку в СКЛАДЕ
+    all_sklad = ws_sklad.get_all_values()
+    for i in range(len(all_sklad) - 1, 0, -1):
+        if all_sklad[i] and all_sklad[i][0]:
+            ws_sklad.delete_rows(i + 1)
+            break
+    
+    # Удалить последнюю строку в ФИНАНСАХ
+    all_fin = ws_fin.get_all_values()
+    for i in range(len(all_fin) - 1, 0, -1):
+        if all_fin[i] and all_fin[i][0]:
+            ws_fin.delete_rows(i + 1)
+            break
+    
+    # Вернуть остаток на сайт
+    if operation == "Продажа":
+        update_stock_on_site(product_name, qty)
+    elif operation == "Закуп":
+        update_stock_on_site(product_name, -qty)
+    
+    return product_name
 
 # ========== КОМАНДА /start ==========
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -179,6 +224,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     elif text == "📋 История":
         await cmd_history(update, context)
+        return
+        elif text == "🗑 Очистить":
+        result = delete_last_record()
+        if result:
+            await update.message.reply_text(f"🗑 Удалена последняя запись: {result}. Остаток на сайте восстановлен.")
+        else:
+            await update.message.reply_text("📋 Нечего удалять.")
         return
     
     # ===== АВТОРИЗАЦИЯ =====

@@ -68,7 +68,10 @@ def update_stock_on_site(product_name, quantity_change):
 def parse_message(text):
     synonyms = load_synonyms()
     syns_text = "\n".join([f"  {k} -> {v}" for k, v in list(synonyms.items())[:50]])
-    sp = f"Extract JSON: product, price, supply, quantity, client, operation. Synonyms: {syns_text}. Return JSON only."
+    sp = f"""Extract JSON with these exact keys: "product", "price", "supply", "quantity", "client", "operation".
+Synonyms: {syns_text}
+Rules: If message starts with "Закуп" -> operation="Закуп", else operation="Продажа".
+Return only JSON."""
     r = requests.post(
         "https://api.deepseek.com/v1/chat/completions",
         headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"},

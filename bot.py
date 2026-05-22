@@ -223,12 +223,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await cmd_balance(update, context)
         return
     elif text == "📋 История":
-        await cmd_history(update, context)
+        await update.message.reply_text("Нажата кнопка История")  # отладка
+        # await cmd_history(update, context)
         return
     elif text == "🗑 Очистить":
         result = delete_last_record()
         if result:
-            await update.message.reply_text(f"🗑 Удалена последняя запись: {result}. Остаток на сайте восстановлен.")
+            await update.message.reply_text(f"🗑 Удалена последняя запись: {result}.")
         else:
             await update.message.reply_text("📋 Нечего удалять.")
         return

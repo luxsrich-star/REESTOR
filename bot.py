@@ -75,7 +75,17 @@ def parse_message(text):
         json={"model": "deepseek-chat", "messages": [{"role": "system", "content": sp}, {"role": "user", "content": text}], "temperature": 0.0, "response_format": {"type": "json_object"}},
         timeout=15
     )
-    return json.loads(r.json()["choices"][0]["message"]["content"])
+    result = json.loads(r.json()["choices"][0]["message"]["content"])
+    # Приводим ключи к русским
+    data = {
+        "товар": result.get("product") or result.get("товар") or result.get("name", ""),
+        "цена": result.get("price") or result.get("цена"),
+        "поставка": result.get("supply") or result.get("поставка"),
+        "количество": result.get("quantity") or result.get("количество") or 1,
+        "клиент": result.get("client") or result.get("клиент"),
+        "операция": "Продажа" if result.get("operation") != "Закуп" else "Закуп"
+    }
+    return data
 
 def write_to_sheets(data, site_data):
     today = datetime.now().strftime("%d.%m.%Y")

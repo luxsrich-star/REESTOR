@@ -221,7 +221,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     elif text == "💰 Прибыль":
         await cmd_balance(update, context)
-        return
+        returngit add .
     elif text == "📋 История":
         await cmd_history(update, context)
         return

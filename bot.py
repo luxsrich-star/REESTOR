@@ -223,8 +223,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await cmd_balance(update, context)
         return
     elif text == "📋 История":
-        await update.message.reply_text("Нажата кнопка История")  # отладка
-        # await cmd_history(update, context)
+        await cmd_history(update, context)
         return
     elif text == "🗑 Очистить":
         result = delete_last_record()
@@ -383,17 +382,20 @@ async def cmd_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"💸 Текущий баланс: {total:,.0f} руб")
 
 async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    rows = ws_history.get_all_values()[-15:]
-    if not rows or (len(rows) == 1 and not rows[0][0]):
+    all_rows = ws_history.get_all_values()
+    data_rows = [row for row in all_rows[1:] if row and len(row) >= 5 and row[0]]
+    last = data_rows[-15:] if len(data_rows) > 15 else data_rows
+    
+    if not last:
         await update.message.reply_text("📋 История пуста")
         return
     
     msg = "📋 Последние операции:\n\n"
-    for row in reversed(rows[-15:]):
-        if row and row[0]:
-            client = f" | {row[6]}" if row[6] else ""
-            profit = f" | +{row[7]} руб" if row[7] else ""
-            msg += f"{row[0]} — {row[1]}: {row[2]}, {row[3]} руб × {row[4]} шт{client}{profit}\n"
+    for row in reversed(last):
+        client = f" | {row[6]}" if len(row) > 6 and row[6] else ""
+        profit = f" | +{row[7]} руб" if len(row) > 7 and row[7] else ""
+        msg += f"{row[0]} — {row[1]}: {row[2]}, {row[3]} руб × {row[4]} шт{client}{profit}\n"
+    
     await update.message.reply_text(msg)
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):

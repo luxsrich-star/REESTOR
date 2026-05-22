@@ -276,14 +276,51 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_ostatki(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         r = requests.get(f"https://b2bshopb2b.up.railway.app/api/shop/{SHOP_SLUG}", timeout=10)
-        products = r.json().get("products", [])
-        msg = "📦 Остатки:\n"
+        data = r.json()
+        products = data.get("products", [])
+        categories = data.get("categories", [])
+        
+        cat_map = {}
+        for cat in categories:
+            cat_map[cat["id"]] = cat["name"]
+        parent_map = {}
+        for cat in categories:
+            if cat.get("parentId"):
+                parent_map[cat["id"]] = cat["parentId"]
+        
+        grouped = {}
         for p in products:
-            name = p.get("name", "?")
-            stock = p.get("stock", 0)
-            price = p.get("price", "?")
-            msg += f"• {name} — {stock} шт | {price} руб\n"
-        await update.message.reply_text(msg or "Склад пуст")
+            if p.get("hidden"):
+                continue
+            cat_id = p.get("categoryId", "other")
+            cat_name = cat_map.get(cat_id, "Другое")
+            parent_id = parent_map.get(cat_id)
+            if parent_id:
+                parent_name = cat_map.get(parent_id, "")
+                if parent_name:
+                    cat_name = f"{cat_name} ({parent_name})"
+            if cat_name not in grouped:
+                grouped[cat_name] = []
+            name = p["name"]
+            for prefix in ["D.L.T.A. ", "DLTA ", "CATS WILL ", "CATSWILL ", "Fedors ", "Fedrs "]:
+                if name.startswith(prefix):
+                    name = name[len(prefix):]
+                    break
+            name = name.strip()
+            grouped[cat_name].append(f"• {name} - {p['stock']} шт | {p['price']} руб")
+        
+        if not grouped:
+            await update.message.reply_text("📦 Склад пуст")
+            return
+        
+        msg = "📦 ОСТАТКИ:\n"
+        emoji_map = {"Шайбы": "🟢", "Жижа": "🟣", "D. L. T. A": "🟢", "CATSWILL": "🟣", "Fedrs": "🔵"}
+        for cat_name, items in grouped.items():
+            emoji = emoji_map.get(cat_name, "📌")
+            msg += f"\n{emoji} {cat_name}\n"
+            msg += "\n".join(items) + "\n"
+        
+        await update.message.reply_text(msg)
     except:
         await update.message.reply_text("⚠️ Не удалось загрузить остатки с сайта")
 

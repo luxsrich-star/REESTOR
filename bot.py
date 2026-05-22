@@ -209,7 +209,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         data = parse_message(text)
-        await update.message.reply_text(f"Debug: {json.dumps(data, ensure_ascii=False)}")
     except Exception as e:
         await update.message.reply_text(f"❌ Ошибка парсинга: {e}")
         return

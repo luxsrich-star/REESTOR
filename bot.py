@@ -196,8 +196,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         data = parse_message(text)
-    except:
-        await update.message.reply_text("❌ Не смог распознать сообщение.")
+        await update.message.reply_text(f"Debug: {json.dumps(data, ensure_ascii=False)}")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка парсинга: {e}")
         return
     
     site_data = find_product_on_site(data["товар"])

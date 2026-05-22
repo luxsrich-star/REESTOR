@@ -7,7 +7,6 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, Con
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
-# ========== КОНФИГУРАЦИЯ ==========
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 DEEPSEEK_API_KEY = os.environ["DEEPSEEK_API_KEY"]
 SPREADSHEET_ID = os.environ["SPREADSHEET_ID"]
@@ -21,7 +20,6 @@ SITE_BIND_TG = f"{SITE_API_BASE}/bind-telegram"
 SITE_CHECK_TG = f"{SITE_API_BASE}/check-telegram"
 SHOP_SLUG = os.environ.get("SHOP_SLUG", "shop")
 
-# ========== GOOGLE SHEETS ==========
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 creds = ServiceAccountCredentials.from_json_keyfile_dict(GDRIVE_CREDENTIALS, scope)
 client = gspread.authorize(creds)
@@ -33,14 +31,12 @@ ws_tovary = sheet.worksheet("ТОВАРЫ")
 
 user_states = {}
 
-# ========== МЕНЮ ==========
 def main_keyboard():
     return ReplyKeyboardMarkup([
         [KeyboardButton("📦 Остатки"), KeyboardButton("💰 Прибыль")],
         [KeyboardButton("📋 История"), KeyboardButton("🗑 Очистить")]
     ], resize_keyboard=True)
 
-# ========== СИНОНИМЫ ==========
 def load_synonyms():
     rows = ws_tovary.get_all_values()[1:]
     syns = {}
@@ -55,7 +51,6 @@ def load_synonyms():
                         syns[s.lower()] = main
     return syns
 
-# ========== API САЙТА ==========
 def find_product_on_site(product_name):
     try:
         r = requests.get(SITE_FIND_PRODUCT, params={"shopSlug": SHOP_SLUG, "productName": product_name}, timeout=10)
@@ -70,7 +65,6 @@ def update_stock_on_site(product_name, quantity_change):
     except:
         return {"success": False}
 
-# ========== DEEPSEEK ==========
 def parse_message(text):
     synonyms = load_synonyms()
     syns_text = "\n".join([f"  {k} -> {v}" for k, v in list(synonyms.items())[:50]])
@@ -83,7 +77,6 @@ def parse_message(text):
     )
     return json.loads(r.json()["choices"][0]["message"]["content"])
 
-# ========== ЗАПИСЬ ==========
 def write_to_sheets(data, site_data):
     today = datetime.now().strftime("%d.%m.%Y")
     qty = data["количество"]
@@ -96,14 +89,13 @@ def write_to_sheets(data, site_data):
     if data["операция"] == "Продажа":
         revenue = price * qty
         profit = (price - cost) * qty if cost else 0
-        ws_fin.append_row([today, "Продажа", data["поставка"], data["товар"], revenue, f"Profit: {profit}"])
+        ws_fin.append_row([today, "Продажа", data["поставка"], data["товар"], revenue, f"Прибыль: {profit}"])
     else:
         ws_fin.append_row([today, "Закуп", data["поставка"], data["товар"], -(price * qty), ""])
     client = data.get("клиент") or ""
     profit_val = ((price - cost) * qty) if (cost and data["операция"] == "Продажа") else ""
     ws_history.append_row([today, data["операция"], data["товар"], price, qty, data["поставка"], client, profit_val])
 
-# ========== УДАЛЕНИЕ ==========
 def delete_record_by_row(row_number):
     all_history = ws_history.get_all_values()
     if row_number < 2 or row_number > len(all_history):
@@ -132,17 +124,16 @@ def delete_record_by_row(row_number):
         update_stock_on_site(product_name, -qty)
     return product_name
 
-# ========== КОМАНДЫ ==========
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
     try:
         r = requests.get(SITE_CHECK_TG, params={"slug": SHOP_SLUG, "telegramId": chat_id}, timeout=10)
         if r.status_code == 200 and r.json().get("success"):
-            await update.message.reply_text(f"Welcome! Shop: {r.json().get('shopName', SHOP_SLUG)}", reply_markup=main_keyboard())
+            await update.message.reply_text(f"👋 С возвращением! Магазин: {r.json().get('shopName', SHOP_SLUG)}", reply_markup=main_keyboard())
             return
     except:
         pass
-    await update.message.reply_text("Enter shop slug:")
+    await update.message.reply_text("🔐 Введите slug магазина:")
     user_states[chat_id] = {"state": "waiting_slug"}
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -155,11 +146,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             row_num = int(text)
             result = delete_record_by_row(row_num)
             if result:
-                await update.message.reply_text(f"Deleted: {result}. Stock restored.")
+                await update.message.reply_text(f"🗑 Удалена запись: {result}. Остаток на сайте восстановлен.")
             else:
-                await update.message.reply_text("Invalid row.")
+                await update.message.reply_text("❌ Неверный номер строки.")
         except:
-            await update.message.reply_text("Enter number.")
+            await update.message.reply_text("❌ Введите число.")
         user_states.pop(chat_id, None)
         return
     
@@ -174,17 +165,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     elif text == "🗑 Очистить":
         user_states[chat_id] = {"state": "waiting_delete_row"}
-        await update.message.reply_text("Enter row number to delete:")
+        await update.message.reply_text("Введите номер строки для удаления (# из Истории):")
         return
     
     if state == "waiting_slug":
         user_states[chat_id] = {"state": "waiting_access_code", "data": {"slug": text}}
-        await update.message.reply_text("Enter access code:")
+        await update.message.reply_text("🔑 Введите код доступа:")
         return
     elif state == "waiting_access_code":
         slug = user_states[chat_id]["data"]["slug"]
         user_states[chat_id] = {"state": "waiting_verify_code", "data": {"slug": slug, "access_code": text}}
-        await update.message.reply_text("Enter verify code:")
+        await update.message.reply_text("🔢 Введите код подтверждения:")
         return
     elif state == "waiting_verify_code":
         slug = user_states[chat_id]["data"]["slug"]
@@ -196,22 +187,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if data.get("success"):
                 requests.post(SITE_BIND_TG, json={"shopSlug": slug, "telegramId": chat_id}, timeout=10)
                 user_states.pop(chat_id, None)
-                await update.message.reply_text(f"Access granted! Shop: {data.get('shopName', slug)}", reply_markup=main_keyboard())
+                await update.message.reply_text(f"✅ Доступ разрешён! Магазин: {data.get('shopName', slug)}", reply_markup=main_keyboard())
             else:
-                await update.message.reply_text(f"Error: {data.get('error', 'invalid')}. /start")
+                await update.message.reply_text(f"❌ Ошибка: {data.get('error', 'неверные данные')}. /start")
         except:
-            await update.message.reply_text("Site unreachable.")
+            await update.message.reply_text("⚠️ Сайт недоступен.")
         return
     
     try:
         data = parse_message(text)
     except:
-        await update.message.reply_text("Could not parse.")
+        await update.message.reply_text("❌ Не смог распознать сообщение.")
         return
     
     site_data = find_product_on_site(data["товар"])
     if not site_data.get("found"):
-        await update.message.reply_text(f"Product not found: {data['товар']}")
+        await update.message.reply_text(f"❌ Товар «{data['товар']}» не найден на сайте.")
         return
     
     if data["цена"] is None:
@@ -220,7 +211,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     qty_change = -data["количество"] if data["операция"] == "Продажа" else data["количество"]
     update_result = update_stock_on_site(data["товар"], qty_change)
     if not update_result.get("success"):
-        await update.message.reply_text("Site not updated. Saved to sheets.")
+        await update.message.reply_text("⚠️ Сайт не обновлён. Запись в таблицу сделана.")
     
     write_to_sheets(data, site_data)
     
@@ -231,13 +222,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     profit = (price - cost) * qty if cost else 0
     new_stock = update_result.get("newStock", site_data.get("currentStock", 0) + qty_change)
     
-    msg = f"Sold: {data['товар']}\nPrice: {price} x {qty}\nSupply: {data['поставка']}\n"
+    msg = f"💰 Продажа: {data['товар']}\n💵 Цена: {price} руб × {qty} шт\n📦 Поставка: {data['поставка']}\n"
     if data.get("клиент"):
-        msg += f"Client: {data['клиент']}\n"
-    msg += f"Revenue: {revenue}\n"
+        msg += f"👤 Клиент: {data['клиент']}\n"
+    msg += f"🛒 Оборот: {revenue} руб\n"
     if cost:
-        msg += f"Profit: {profit}\n"
-    msg += f"Stock: {new_stock}"
+        msg += f"🟢 Чистая прибыль: {profit} руб\n"
+    msg += f"📦 Осталось: {new_stock} шт"
     await update.message.reply_text(msg)
 
 async def cmd_ostatki(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -258,7 +249,7 @@ async def cmd_ostatki(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if p.get("hidden"):
                 continue
             cat_id = p.get("categoryId", "other")
-            cat_name = cat_map.get(cat_id, "Other")
+            cat_name = cat_map.get(cat_id, "Другое")
             parent_id = parent_map.get(cat_id)
             if parent_id:
                 parent_name = cat_map.get(parent_id, "")
@@ -272,43 +263,54 @@ async def cmd_ostatki(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     name = name[len(prefix):]
                     break
             name = name.strip()
-            grouped[cat_name].append(f"- {name} - {p['stock']} pcs | {p['price']} rub")
+            grouped[cat_name].append(f"• {name} — {p['stock']} шт | {p['price']} руб")
         if not grouped:
-            await update.message.reply_text("Stock empty")
+            await update.message.reply_text("📦 Склад пуст")
             return
-        msg = "STOCK:\n"
+        msg = "📦 ОСТАТКИ:\n"
+        emoji_map = {"Шайбы": "🟢", "Жижа": "🟣", "D. L. T. A": "🟢", "CATSWILL": "🟣", "Fedrs": "🔵"}
         for cat_name, items in grouped.items():
-            msg += f"\n{cat_name}\n"
+            emoji = emoji_map.get(cat_name, "📌")
+            msg += f"\n{emoji} {cat_name}\n"
             msg += "\n".join(items) + "\n"
         await update.message.reply_text(msg)
     except:
-        await update.message.reply_text("Failed to load stock.")
+        await update.message.reply_text("⚠️ Не удалось загрузить остатки с сайта")
 
 async def cmd_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rows = ws_fin.get_all_values()[1:]
     total = sum(float(row[4]) for row in rows if row[4])
-    await update.message.reply_text(f"Balance: {total:,.0f} rub")
+    await update.message.reply_text(f"💸 Текущий баланс: {total:,.0f} руб")
 
 async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     all_rows = ws_history.get_all_values()
     data_rows = [row for row in all_rows[1:] if row and len(row) >= 5 and row[0]]
     last = data_rows[-5:] if len(data_rows) > 5 else data_rows
     if not last:
-        await update.message.reply_text("History empty")
+        await update.message.reply_text("📋 История пуста")
         return
-    msg = "Last operations:\n\n"
+    msg = "📋 Последние операции:\n\n"
     for row in reversed(last):
         idx = all_rows.index(row) + 1
         client = f" | {row[6]}" if len(row) > 6 and row[6] else ""
-        profit = f" | +{row[7]} rub" if len(row) > 7 and row[7] else ""
-        msg += f"#{idx} {row[0]} - {row[1]}: {row[2]}, {row[3]} x {row[4]}{client}{profit}\n"
-    msg += "\nTo delete press Clear and enter row number."
+        profit = f" | +{row[7]} руб" if len(row) > 7 and row[7] else ""
+        msg += f"#{idx} {row[0]} — {row[1]}: {row[2]}, {row[3]} руб × {row[4]} шт{client}{profit}\n"
+    msg += "\nДля удаления нажмите 🗑 Очистить и введите номер строки."
     await update.message.reply_text(msg)
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Help: write product price supply. Buttons: Stock, Profit, History, Clear.")
+    await update.message.reply_text(
+        "ℹ️ Как работать:\n\n"
+        "Продажа:\n"
+        "DLTA адреналин голд 450 поставка 4\n"
+        "DLTA адреналин голд поставка 4 2 шт\n"
+        "DLTA адреналин голд 450 поставка 4 primer\n\n"
+        "📦 Остатки — что на складе\n"
+        "💰 Прибыль — баланс\n"
+        "📋 История — последние продажи\n"
+        "🗑 Очистить — удалить запись по номеру"
+    )
 
-# ========== ЗАПУСК ==========
 if __name__ == "__main__":
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
@@ -317,5 +319,5 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("history", cmd_history))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    print("REESTOR started")
+    print("🚀 REESTOR запущен")
     app.run_polling()

@@ -276,7 +276,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_ostatki(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         r = requests.get(f"https://b2bshopb2b.up.railway.app/api/shop/{SHOP_SLUG}", timeout=10)
-        products = r.json()
+        products = r.json().get("products", [])
         msg = "📦 Остатки:\n"
         for p in products:
             name = p.get("name", "?")

@@ -212,7 +212,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ Сайт недоступен.")
         return
     
-    try:
+   try:
         data = parse_message(text)
     except Exception as e:
         await update.message.reply_text(f"❌ Ошибка парсинга: {e}")
@@ -238,10 +238,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cost = site_data.get("cost", 0)
     revenue = price * qty
     profit = (price - cost) * qty if cost else 0
-        if update_result.get("success"):
-            new_stock = update_result.get("newStock", site_data.get("currentStock", 0) + qty_change)
-        else:
-            new_stock = site_data.get("currentStock", 0)
+    if update_result.get("success"):
+        new_stock = update_result.get("newStock", site_data.get("currentStock", 0) + qty_change)
+    else:
+        new_stock = site_data.get("currentStock", 0)
     
     msg = f"💰 Продажа: {data['товар']}\n💵 Цена: {price} руб × {qty} шт\n📦 Поставка: {data['поставка']}\n"
     if data.get("клиент"):
@@ -251,7 +251,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f"🟢 Чистая прибыль: {profit} руб\n"
     msg += f"📦 Осталось: {new_stock} шт"
     await update.message.reply_text(msg)
-
 async def cmd_ostatki(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         r = requests.get(f"https://b2bshopb2b.up.railway.app/api/shop/{SHOP_SLUG}", timeout=10)

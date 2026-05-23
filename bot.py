@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import uuid
 import logging
 from datetime import datetime
 
@@ -21,134 +22,226 @@ from telegram.ext import (
     filters
 )
 
-from oauth2client.service_account import ServiceAccountCredentials
+from oauth2client.service_account import (
+    ServiceAccountCredentials
+)
 
+# ================= LOG =================
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s"
+)
+
+# ================= CONFIG =================
 
 TOKEN = os.environ["TELEGRAM_TOKEN"]
-TABLE_ID = os.environ["SPREADSHEET_ID"]
-GOOGLE_KEY = json.loads(os.environ["GDRIVE_CREDENTIALS"])
 
-SLUG = os.environ.get("SHOP_SLUG", "shop")
+TABLE_ID = os.environ["SPREADSHEET_ID"]
+
+GOOGLE_KEY = json.loads(
+    os.environ["GDRIVE_CREDENTIALS"]
+)
+
+SLUG = os.environ.get(
+    "SHOP_SLUG",
+    "shop"
+)
 
 SITE = "https://b2bshopb2b.up.railway.app/api/admin"
-SHOP_URL = f"https://b2bshopb2b.up.railway.app/api/shop/{SLUG}"
 
+SHOP_URL = (
+    f"https://b2bshopb2b.up.railway.app/api/shop/{SLUG}"
+)
+
+# ================= GOOGLE =================
 
 scope = [
     "https://spreadsheets.google.com/feeds",
     "https://www.googleapis.com/auth/drive"
 ]
 
-gs = gspread.authorize(
-    ServiceAccountCredentials.from_json_keyfile_dict(
+creds = (
+    ServiceAccountCredentials
+    .from_json_keyfile_dict(
         GOOGLE_KEY,
         scope
     )
 )
 
-sh = gs.open_by_key(TABLE_ID)
+gs = gspread.authorize(
+    creds
+)
 
-склад = sh.worksheet("СКЛАД")
-фин = sh.worksheet("ФИНАНСЫ")
-ист = sh.worksheet("ИСТОРИЯ")
-тов = sh.worksheet("ТОВАРЫ")
+book = gs.open_by_key(
+    TABLE_ID
+)
 
+склад = book.worksheet(
+    "СКЛАД"
+)
 
-def uid():
-    return str(int(time.time() * 1000))
+фин = book.worksheet(
+    "ФИНАНСЫ"
+)
 
+ист = book.worksheet(
+    "ИСТОРИЯ"
+)
+
+тов = book.worksheet(
+    "ТОВАРЫ"
+)
+
+# ================= MENU =================
 
 def меню():
+
     return ReplyKeyboardMarkup(
+
         [
             [
-                KeyboardButton("📦 Остатки"),
-                KeyboardButton("💰 Прибыль")
+                KeyboardButton(
+                    "📦 Остатки"
+                ),
+
+                KeyboardButton(
+                    "💰 Прибыль"
+                )
             ],
+
             [
-                KeyboardButton("📋 История"),
-                KeyboardButton("🗑 Очистить")
+                KeyboardButton(
+                    "📋 История"
+                ),
+
+                KeyboardButton(
+                    "🗑 Очистить"
+                )
             ]
         ],
+
         resize_keyboard=True
+    )
+
+# ================= HELPERS =================
+
+def uid():
+
+    return str(
+        int(
+            time.time()*1000
+        )
+    )
+
+
+def сейчас():
+
+    return datetime.now().strftime(
+        "%d.%m.%Y %H:%M:%S"
     )
 
 
 def синонимы():
 
-    r = {}
+    result = {}
 
-    rows = тов.get_all_values()[1:]
+    rows = тов.get_all_values()
 
-    for x in rows:
+    for row in rows[1:]:
 
-        if not x:
+        if not row:
+
             continue
 
-        canon = x[0].strip()
+        canon = row[0].strip()
 
-        r[canon.lower()] = canon
+        result[
+            canon.lower()
+        ] = canon
 
-        if len(x) > 1 and x[1]:
+        if len(row) > 1:
 
-            for s in x[1].split(","):
+            for s in row[1].split(","):
 
                 s = s.strip()
 
                 if s:
-                    r[s.lower()] = canon
 
-    return r
+                    result[
+                        s.lower()
+                    ] = canon
 
+    return result
+
+
+# ================= API =================
 
 def найти_товар(name):
 
     try:
 
         r = requests.get(
+
             f"{SITE}/find-product",
+
             params={
+
                 "shopSlug": SLUG,
+
                 "productName": name
+
             },
-            timeout=10
+
+            timeout=15
+
         )
 
         data = r.json()
 
-        if data.get("found"):
-            return data
+        logging.info(data)
+
+        return data
 
     except Exception as e:
+
         logging.error(e)
 
-    return {"found": False}
+        return {
+            "found": False
+        }
 
 
-def обновить_сайт(product_name, qty):
+def обновить_сайт(
+        product,
+        qty
+):
 
     try:
 
         r = requests.post(
+
             f"{SITE}/update-stock",
+
             json={
+
                 "shopSlug": SLUG,
-                "productName": product_name,
+
+                "productName": product,
+
                 "quantityChange": qty
+
             },
+
             timeout=15
+
         )
 
         logging.info(r.text)
 
-        if r.status_code != 200:
-            return {
-                "success": False
-            }
+        data = r.json()
 
-        return r.json()
+        return data
 
     except Exception as e:
 
@@ -159,6 +252,8 @@ def обновить_сайт(product_name, qty):
         }
 
 
+# ================= PARSER =================
+
 def разбор(text):
 
     syn = синонимы()
@@ -167,7 +262,9 @@ def разбор(text):
 
     op = "Продажа"
 
-    if text.lower().startswith("закуп"):
+    if text.lower().startswith(
+            "закуп"
+    ):
 
         op = "Закуп"
 
@@ -177,14 +274,25 @@ def разбор(text):
 
     if "поставка" in text:
 
-        p = text.split("поставка")
+        p = text.split(
+            "поставка"
+        )
 
         text = p[0].strip()
 
-        tail = p[1].strip().split()
+        right = (
+            p[1]
+            .strip()
+            .split()
+        )
 
-        if tail and tail[0].isdigit():
-            supply = int(tail[0])
+        if right:
+
+            if right[0].isdigit():
+
+                supply = int(
+                    right[0]
+                )
 
     nums = []
 
@@ -192,128 +300,276 @@ def разбор(text):
 
     for w in text.split():
 
-        c = w.replace(
-            "шт",
-            ""
+        c = (
+            w.replace(
+                "шт",
+                ""
+            )
+            .replace(
+                "штук",
+                ""
+            )
         )
 
         if c.isdigit():
-            nums.append(int(c))
+
+            nums.append(
+                int(c)
+            )
 
         else:
+
             words.append(w)
 
-    price = nums[0] if nums else None
+    price = (
+        nums[0]
+        if nums
+        else None
+    )
 
-    qty = nums[1] if len(nums) > 1 else 1
+    qty = (
 
-    product = " ".join(words)
+        nums[1]
+
+        if len(nums) > 1
+
+        else 1
+    )
+
+    product = (
+        " ".join(
+            words
+        )
+        .strip()
+    )
 
     if product.lower() in syn:
-        product = syn[product.lower()]
+
+        product = syn[
+            product.lower()
+        ]
 
     return {
+
         "товар": product,
+
         "цена": price,
+
         "количество": qty,
+
         "операция": op,
+
         "поставка": supply
     }
 
+# ================= WRITE =================
 
-def запись(data, site):
+def запись(
+        data,
+        site
+):
 
-    id_op = uid()
+    op_id = uid()
 
-    date = datetime.now().strftime(
-        "%d.%m.%Y %H:%M:%S"
+    date = сейчас()
+
+    qty = data[
+        "количество"
+    ]
+
+    приход = (
+        qty
+
+        if data[
+            "операция"
+        ] == "Закуп"
+
+        else 0
     )
 
-    qty = data["количество"]
+    расход = (
+        qty
 
-    приход = qty if data["операция"] == "Закуп" else 0
+        if data[
+            "операция"
+        ] == "Продажа"
 
-    расход = qty if data["операция"] == "Продажа" else 0
+        else 0
+    )
 
     склад.append_row([
-        id_op,
+
+        op_id,
+
         date,
-        data["операция"],
-        data["поставка"],
-        data["товар"],
+
+        data[
+            "операция"
+        ],
+
+        data[
+            "поставка"
+        ],
+
+        data[
+            "товар"
+        ],
+
         приход,
+
         расход
+
     ])
 
-    цена = data["цена"]
+    price = data[
+        "цена"
+    ]
 
-    оборот = цена * qty
+    amount = price * qty
 
     фин.append_row([
-        id_op,
+
+        op_id,
+
         date,
-        data["операция"],
-        data["поставка"],
-        data["товар"],
-        оборот,
+
+        data[
+            "операция"
+        ],
+
+        data[
+            "поставка"
+        ],
+
+        data[
+            "товар"
+        ],
+
+        amount,
+
         ""
+
     ])
 
     ист.append_row([
-        id_op,
+
+        op_id,
+
         date,
-        data["операция"],
-        data["товар"],
-        цена,
+
+        data[
+            "операция"
+        ],
+
+        data[
+            "товар"
+        ],
+
+        price,
+
         qty,
-        data["поставка"]
+
+        data[
+            "поставка"
+        ],
+
+        "",
+
+        ""
+
     ])
 
 
-def удалить_операцию(row):
+# ================= DELETE =================
 
-    hist = ист.get_all_values()
+def удалить(
+        number
+):
 
-    if row < 2 or row > len(hist):
+    rows = (
+        ист
+        .get_all_values()
+    )
+
+    if number < 2:
+
         return None
 
-    op = hist[row - 1]
+    if number > len(rows):
 
-    uid_op = op[0]
+        return None
 
-    product = op[3]
+    row = rows[
+        number-1
+    ]
 
-    qty = int(op[5])
+    op_id = row[0]
 
-    action = op[2]
+    action = row[2]
 
-    stock_rows = склад.get_all_values()
+    product = row[3]
+
+    qty = int(
+        row[5]
+    )
+
+    hist = (
+        ист
+        .get_all_values()
+    )
+
+    stock = (
+        склад
+        .get_all_values()
+    )
+
+    money = (
+        фин
+        .get_all_values()
+    )
 
     for i in range(
-        len(stock_rows)-1,
+        len(stock)-1,
         0,
         -1
     ):
 
-        if stock_rows[i][0] == uid_op:
-            склад.delete_rows(i + 1)
+        if stock[i][0] == op_id:
+
+            склад.delete_rows(
+                i+1
+            )
+
             break
 
-    fin_rows = фин.get_all_values()
-
     for i in range(
-        len(fin_rows)-1,
+        len(money)-1,
         0,
         -1
     ):
 
-        if fin_rows[i][0] == uid_op:
-            фин.delete_rows(i + 1)
+        if money[i][0] == op_id:
+
+            фин.delete_rows(
+                i+1
+            )
+
             break
 
-    ист.delete_rows(row)
+    ист.delete_rows(
+        number
+    )
 
-    delta = qty if action == "Продажа" else -qty
+    delta = (
+
+        qty
+
+        if action
+        ==
+        "Продажа"
+
+        else -qty
+    )
 
     обновить_сайт(
         product,
@@ -323,29 +579,187 @@ def удалить_операцию(row):
     return product
 
 
-async def сообщение(
-        update: Update,
-        context:
-        ContextTypes.DEFAULT_TYPE
+# ================= COMMANDS =================
+
+async def старт(
+        update,
+        context
 ):
 
-    text = update.message.text.strip()
+    await update.message.reply_text(
 
-    state = context.user_data.get(
-        "state"
+        "REESTOR BOT",
+
+        reply_markup=меню()
+
     )
 
-    if state == "delete":
 
-        res = удалить_операцию(
-            int(text)
+async def остатки(
+        update,
+        context
+):
+
+    try:
+
+        r = requests.get(
+            SHOP_URL,
+            timeout=10
         )
+
+        data = r.json()
+
+        products = data.get(
+            "products",
+            []
+        )
+
+        text = "📦 ОСТАТКИ\n\n"
+
+        for p in products:
+
+            if p.get(
+                "hidden"
+            ):
+                continue
+
+            text += (
+                f"• "
+                f"{p['name']} — "
+                f"{p['stock']} шт | "
+                f"{p['price']} руб\n"
+            )
 
         await update.message.reply_text(
-            f"Удалено: {res}"
+            text
         )
 
-        context.user_data.clear()
+    except Exception:
+
+        await update.message.reply_text(
+            "Ошибка"
+        )
+
+
+async def прибыль(
+        update,
+        context
+):
+
+    rows = (
+        фин
+        .get_all_values()
+    )[1:]
+
+    total = 0
+
+    for r in rows:
+
+        try:
+
+            total += float(
+                r[5]
+            )
+
+        except:
+
+            pass
+
+    await update.message.reply_text(
+        f"💰 {total}"
+    )
+
+
+async def история(
+        update,
+        context
+):
+
+    rows = (
+        ист
+        .get_all_values()
+    )
+
+    if len(rows) <= 1:
+
+        await update.message.reply_text(
+            "Пусто"
+        )
+
+        return
+
+    text = (
+        "📋 История\n\n"
+    )
+
+    last = rows[-5:]
+
+    for row in last:
+
+        idx = rows.index(
+            row
+        ) + 1
+
+        text += (
+
+            f"#{idx} "
+
+            f"{row[3]} "
+
+            f"{row[5]} шт\n"
+
+        )
+
+    await update.message.reply_text(
+        text
+    )
+
+# ================= MESSAGE =================
+
+async def сообщение(
+        update,
+        context
+):
+
+    text = (
+        update
+        .message
+        .text
+        .strip()
+    )
+
+    state = (
+        context
+        .user_data
+        .get(
+            "state"
+        )
+    )
+
+    if text == "📦 Остатки":
+
+        await остатки(
+            update,
+            context
+        )
+
+        return
+
+    if text == "💰 Прибыль":
+
+        await прибыль(
+            update,
+            context
+        )
+
+        return
+
+    if text == "📋 История":
+
+        await история(
+            update,
+            context
+        )
 
         return
 
@@ -356,15 +770,33 @@ async def сообщение(
         ] = "delete"
 
         await update.message.reply_text(
-            "Введите номер:"
+            "Введите номер"
         )
 
         return
 
-    data = разбор(text)
+    if state == "delete":
+
+        res = удалить(
+            int(text)
+        )
+
+        context.user_data.clear()
+
+        await update.message.reply_text(
+            f"Удалено {res}"
+        )
+
+        return
+
+    data = разбор(
+        text
+    )
 
     site = найти_товар(
-        data["товар"]
+        data[
+            "товар"
+        ]
     )
 
     if not site.get(
@@ -381,20 +813,34 @@ async def сообщение(
         "productName"
     ]
 
-    data["товар"] = canonical
+    data[
+        "товар"
+    ] = canonical
 
-    if data["цена"] is None:
+    if data[
+        "цена"
+    ] is None:
 
-        data["цена"] = site.get(
+        data[
+            "цена"
+        ] = site.get(
             "price",
             0
         )
 
     delta = (
-        -data["количество"]
-        if data["операция"]
-        == "Продажа"
-        else data["количество"]
+
+        -data[
+            "количество"
+        ]
+
+        if data[
+            "операция"
+        ] == "Продажа"
+
+        else data[
+            "количество"
+        ]
     )
 
     upd = обновить_сайт(
@@ -418,19 +864,32 @@ async def сообщение(
     )
 
     await update.message.reply_text(
-        f"Готово\n"
-        f"{canonical}\n"
-        f"Осталось: "
+
+        f"✅ {canonical}\n"
+
+        f"Остаток: "
+
         f"{upd['newStock']}"
+
     )
 
+# ================= RUN =================
 
 if __name__ == "__main__":
 
     app = (
         ApplicationBuilder()
-        .token(TOKEN)
+        .token(
+            TOKEN
+        )
         .build()
+    )
+
+    app.add_handler(
+        CommandHandler(
+            "start",
+            старт
+        )
     )
 
     app.add_handler(

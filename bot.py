@@ -7,11 +7,10 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, Con
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
-# ========== КОНФИГУРАЦИЯ ==========
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
-DEEPSEEK_API_KEY = os.environ["DEEPSEEK_API_KEY"]
 SPREADSHEET_ID = os.environ["SPREADSHEET_ID"]
 GDRIVE_CREDENTIALS = json.loads(os.environ["GDRIVE_CREDENTIALS"])
+SHOP_SLUG = os.environ.get("SHOP_SLUG", "shop")
 
 SITE_API_BASE = "https://b2bshopb2b.up.railway.app/api/admin"
 SITE_UPDATE_STOCK = f"{SITE_API_BASE}/update-stock"
@@ -19,9 +18,7 @@ SITE_FIND_PRODUCT = f"{SITE_API_BASE}/find-product"
 SITE_CHECK_ACCESS = f"{SITE_API_BASE}/check-bot-access"
 SITE_BIND_TG = f"{SITE_API_BASE}/bind-telegram"
 SITE_CHECK_TG = f"{SITE_API_BASE}/check-telegram"
-SHOP_SLUG = os.environ.get("SHOP_SLUG", "shop")
 
-# ========== GOOGLE SHEETS ==========
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 creds = ServiceAccountCredentials.from_json_keyfile_dict(GDRIVE_CREDENTIALS, scope)
 client = gspread.authorize(creds)
@@ -33,14 +30,12 @@ ws_tovary = sheet.worksheet("ТОВАРЫ")
 
 user_states = {}
 
-# ========== МЕНЮ ==========
 def main_keyboard():
     return ReplyKeyboardMarkup([
         [KeyboardButton("📦 Остатки"), KeyboardButton("💰 Прибыль")],
         [KeyboardButton("📋 История"), KeyboardButton("🗑 Очистить")]
     ], resize_keyboard=True)
 
-# ========== СИНОНИМЫ ==========
 def load_synonyms():
     rows = ws_tovary.get_all_values()[1:]
     syns = {}
@@ -55,7 +50,6 @@ def load_synonyms():
                         syns[s.lower()] = main
     return syns
 
-# ========== API САЙТА ==========
 def find_product_on_site(product_name):
     try:
         r = requests.get(SITE_FIND_PRODUCT, params={"shopSlug": SHOP_SLUG, "productName": product_name}, timeout=10)
@@ -65,34 +59,71 @@ def find_product_on_site(product_name):
 
 def update_stock_on_site(product_name, quantity_change):
     try:
-        r = requests.post(SITE_UPDATE_STOCK, json={"shopSlug": SHOP_SLUG, "productName": product_name, "quantityChange": quantity_change}, timeout=10)
+        r = requests.post(SITE_UPDATE_STOCK,
+            json={"shopSlug": SHOP_SLUG, "productName": product_name, "quantityChange": quantity_change},
+            headers={"Content-Type": "application/json; charset=utf-8"},
+            timeout=10)
         return r.json()
     except:
         return {"success": False}
 
-# ========== DEEPSEEK ==========
 def parse_message(text):
     synonyms = load_synonyms()
-    syns_text = "\n".join([f"  {k} -> {v}" for k, v in list(synonyms.items())[:50]])
-    sp = f"Extract JSON: product, price, supply, quantity, client, operation. Synonyms: {syns_text}. Return JSON only."
-    r = requests.post(
-        "https://api.deepseek.com/v1/chat/completions",
-        headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"},
-        json={"model": "deepseek-chat", "messages": [{"role": "system", "content": sp}, {"role": "user", "content": text}], "temperature": 0.0, "response_format": {"type": "json_object"}},
-        timeout=15
-    )
-    result = json.loads(r.json()["choices"][0]["message"]["content"])
-    data = {
-        "товар": result.get("product") or result.get("товар") or result.get("name", ""),
-        "цена": result.get("price") or result.get("цена"),
-        "поставка": result.get("supply") or result.get("поставка"),
-        "количество": result.get("quantity") or result.get("количество") or 1,
-        "клиент": result.get("client") or result.get("клиент"),
-        "операция": "Продажа" if result.get("operation") != "Закуп" else "Закуп"
+    text = text.strip()
+    
+    if text.lower().startswith("закуп"):
+        operation = "Закуп"
+        text = text[5:].strip()
+    else:
+        operation = "Продажа"
+    
+    supply = None
+    if "поставка" in text:
+        parts = text.split("поставка")
+        text = parts[0].strip()
+        tail = parts[1].strip()
+        supply = int(tail.split()[0]) if tail else None
+    
+    qty = 1
+    words = text.split()
+    for i, w in enumerate(words):
+        clean = w.replace("шт", "").replace("штуки", "").replace("штук", "")
+        if w in ("шт", "штуки", "штук") or (clean.isdigit() and i == len(words)-1):
+            try:
+                qty = int(clean) if clean.isdigit() else int(words[i-1])
+                if clean.isdigit():
+                    words.pop(i)
+                else:
+                    words.pop(i)
+                    words.pop(i-1)
+            except:
+                qty = 1
+            text = " ".join(words)
+            break
+    
+    price = None
+    words = text.split()
+    for i, w in enumerate(reversed(words)):
+        if w.isdigit():
+            price = int(w)
+            words.pop(len(words)-1-i)
+            text = " ".join(words)
+            break
+    
+    product = text.strip()
+    product_lower = product.lower()
+    if product_lower in synonyms:
+        product = synonyms[product_lower]
+    
+    return {
+        "товар": product,
+        "цена": price,
+        "поставка": supply,
+        "количество": qty,
+        "клиент": None,
+        "операция": operation
     }
-    return data
 
-# ========== ЗАПИСЬ В ТАБЛИЦУ ==========
 def write_to_sheets(data, site_data):
     today = datetime.now().strftime("%d.%m.%Y")
     qty = data["количество"]
@@ -112,7 +143,6 @@ def write_to_sheets(data, site_data):
     profit_val = ((price - cost) * qty) if (cost and data["операция"] == "Продажа") else ""
     ws_history.append_row([today, data["операция"], data["товар"], price, qty, data["поставка"], client, profit_val])
 
-# ========== УДАЛЕНИЕ ==========
 def delete_record_by_row(row_number):
     all_history = ws_history.get_all_values()
     if row_number < 2 or row_number > len(all_history):
@@ -141,7 +171,6 @@ def delete_record_by_row(row_number):
         update_stock_on_site(product_name, -qty)
     return product_name
 
-# ========== КОМАНДЫ ==========
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
     try:
@@ -164,9 +193,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             row_num = int(text)
             result = delete_record_by_row(row_num)
             if result:
-                await update.message.reply_text(f"🗑 Удалена запись: {result}. Остаток на сайте восстановлен.")
+                await update.message.reply_text(f"🗑 Удалена запись: {result}. Остаток восстановлен.")
             else:
-                await update.message.reply_text("❌ Неверный номер строки.")
+                await update.message.reply_text("❌ Неверный номер.")
         except:
             await update.message.reply_text("❌ Введите число.")
         user_states.pop(chat_id, None)
@@ -183,7 +212,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     elif text == "🗑 Очистить":
         user_states[chat_id] = {"state": "waiting_delete_row"}
-        await update.message.reply_text("Введите номер строки для удаления (# из Истории):")
+        await update.message.reply_text("Введите номер строки для удаления:")
         return
 
     if state == "waiting_slug":
@@ -191,8 +220,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🔑 Введите код доступа:")
         return
     elif state == "waiting_access_code":
-        slug = user_states[chat_id]["data"]["slug"]
-        user_states[chat_id] = {"state": "waiting_verify_code", "data": {"slug": slug, "access_code": text}}
+        user_states[chat_id] = {"state": "waiting_verify_code", "data": {"slug": user_states[chat_id]["data"]["slug"], "access_code": text}}
         await update.message.reply_text("🔢 Введите код подтверждения:")
         return
     elif state == "waiting_verify_code":
@@ -212,11 +240,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ Сайт недоступен.")
         return
 
-    try:
-        data = parse_message(text)
-    except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка парсинга: {e}")
-        return
+    data = parse_message(text)
 
     site_data = find_product_on_site(data["товар"])
     if not site_data.get("found"):
@@ -228,8 +252,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     qty_change = -data["количество"] if data["операция"] == "Продажа" else data["количество"]
     update_result = update_stock_on_site(data["товар"], qty_change)
-    if not update_result.get("success"):
-        await update.message.reply_text("⚠️ Сайт не обновлён. Запись в таблицу сделана.")
 
     write_to_sheets(data, site_data)
 
@@ -238,10 +260,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cost = site_data.get("cost", 0)
     revenue = price * qty
     profit = (price - cost) * qty if cost else 0
-    if update_result.get("success"):
-        new_stock = update_result.get("newStock", site_data.get("currentStock", 0) + qty_change)
-    else:
-        new_stock = site_data.get("currentStock", 0)
+    new_stock = update_result.get("newStock", site_data.get("currentStock", 0) + qty_change)
 
     msg = f"💰 Продажа: {data['товар']}\n💵 Цена: {price} руб × {qty} шт\n📦 Поставка: {data['поставка']}\n"
     if data.get("клиент"):
@@ -258,24 +277,16 @@ async def cmd_ostatki(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data = r.json()
         products = data.get("products", [])
         categories = data.get("categories", [])
-        cat_map = {}
-        for cat in categories:
-            cat_map[cat["id"]] = cat["name"]
-        parent_map = {}
-        for cat in categories:
-            if cat.get("parentId"):
-                parent_map[cat["id"]] = cat["parentId"]
+        cat_map = {c["id"]: c["name"] for c in categories}
+        parent_map = {c["id"]: c["parentId"] for c in categories if c.get("parentId")}
         grouped = {}
         for p in products:
             if p.get("hidden"):
                 continue
-            cat_id = p.get("categoryId", "other")
-            cat_name = cat_map.get(cat_id, "Другое")
-            parent_id = parent_map.get(cat_id)
-            if parent_id:
-                parent_name = cat_map.get(parent_id, "")
-                if parent_name:
-                    cat_name = f"{cat_name} ({parent_name})"
+            cat_name = cat_map.get(p.get("categoryId", ""), "Другое")
+            pid = parent_map.get(p.get("categoryId", ""))
+            if pid and pid in cat_map:
+                cat_name = f"{cat_name} ({cat_map[pid]})"
             if cat_name not in grouped:
                 grouped[cat_name] = []
             name = p["name"]
@@ -283,20 +294,16 @@ async def cmd_ostatki(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if name.startswith(prefix):
                     name = name[len(prefix):]
                     break
-            name = name.strip()
-            grouped[cat_name].append(f"• {name} — {p['stock']} шт | {p['price']} руб")
+            grouped[cat_name].append(f"• {name.strip()} — {p['stock']} шт | {p['price']} руб")
         if not grouped:
             await update.message.reply_text("📦 Склад пуст")
             return
         msg = "📦 ОСТАТКИ:\n"
-        emoji_map = {"Шайбы": "🟢", "Жижа": "🟣", "D. L. T. A": "🟢", "CATSWILL": "🟣", "Fedrs": "🔵"}
         for cat_name, items in grouped.items():
-            emoji = emoji_map.get(cat_name, "📌")
-            msg += f"\n{emoji} {cat_name}\n"
-            msg += "\n".join(items) + "\n"
+            msg += f"\n📌 {cat_name}\n" + "\n".join(items) + "\n"
         await update.message.reply_text(msg)
     except:
-        await update.message.reply_text("⚠️ Не удалось загрузить остатки с сайта")
+        await update.message.reply_text("⚠️ Не удалось загрузить остатки")
 
 async def cmd_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rows = ws_fin.get_all_values()[1:]
@@ -305,7 +312,7 @@ async def cmd_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     all_rows = ws_history.get_all_values()
-    data_rows = [row for row in all_rows[1:] if row and len(row) >= 5 and row[0]]
+    data_rows = [r for r in all_rows[1:] if r and len(r) >= 5 and r[0]]
     last = data_rows[-5:] if len(data_rows) > 5 else data_rows
     if not last:
         await update.message.reply_text("📋 История пуста")
@@ -313,23 +320,15 @@ async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = "📋 Последние операции:\n\n"
     for row in reversed(last):
         idx = all_rows.index(row) + 1
-        client = f" | {row[6]}" if len(row) > 6 and row[6] else ""
-        profit = f" | +{row[7]} руб" if len(row) > 7 and row[7] else ""
-        msg += f"#{idx} {row[0]} — {row[1]}: {row[2]}, {row[3]} руб × {row[4]} шт{client}{profit}\n"
-    msg += "\n🗑 Для удаления: нажмите кнопку 'Очистить' в меню и введите номер."
+        msg += f"#{idx} {row[0]} — {row[1]}: {row[2]}, {row[3]} руб × {row[4]} шт\n"
+    msg += "\n🗑 Для удаления: кнопка 'Очистить' и введите номер."
     await update.message.reply_text(msg)
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "ℹ️ Как работать:\n\n"
-        "Продажа:\n"
-        "DLTA адреналин голд 450 поставка 4\n"
-        "DLTA адреналин голд поставка 4 2 шт\n"
-        "DLTA адреналин голд 450 поставка 4 primer\n\n"
-        "📦 Остатки — что на складе\n"
-        "💰 Прибыль — баланс\n"
-        "📋 История — последние продажи\n"
-        "🗑 Очистить — удалить запись по номеру"
+        "ℹ️ Продажа: Товар Цена поставка Номер\n"
+        "Пример: Adrenaline Апельсин 450 поставка 1\n\n"
+        "📦 Остатки | 💰 Прибыль | 📋 История | 🗑 Очистить"
     )
 
 if __name__ == "__main__":

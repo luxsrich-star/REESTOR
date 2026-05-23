@@ -638,15 +638,69 @@ async def показать_историю(update: Update):
         лог.error("показать_историю: %s", e)
         await update.message.reply_text("⚠️ Не удалось загрузить историю")
 
+
+
+async def cmd_fix(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🔧 Очищаю таблицу...")
+    почистить_склад()
+    await update.message.reply_text("✅ Готово! СКЛАД очищен от пустых строк, формулы проставлены.")
+
+def почистить_склад() -> None:
+    """
+    Запускается один раз при старте.
+    Удаляет все пустые строки из СКЛАДА и проставляет формулу остатка в столбец H
+    для каждой строки с данными.
+    """
+    лог.info("Очистка СКЛАДА...")
+    try:
+        все = лист_склад.get_all_values()
+        if len(все) < 2:
+            лог.info("СКЛАД пуст, нечего чистить")
+            return
+
+        # Собираем только строки с реальными данными (UID не пустой)
+        заголовок = все[0]
+        данные = [стр for стр in все[1:] if стр and len(стр) > 0 and стр[0].strip()]
+
+        лог.info("Строк с данными: %d, всего строк: %d", len(данные), len(все) - 1)
+
+        if len(данные) == len(все) - 1:
+            лог.info("Пустых строк нет, очистка не нужна")
+            # Но всё равно проверим формулы
+        else:
+            # Очищаем весь лист и записываем заново
+            лист_склад.clear()
+            # Заголовок
+            лист_склад.append_row(заголовок)
+            # Данные с формулами
+            for i, стр in enumerate(данные, start=2):
+                # Берём первые 7 столбцов (A-G), H будет формулой
+                строка = стр[:7] + [f"=SUM(F$2:F{i})-SUM(G$2:G{i})"]
+                лист_склад.append_row(строка, value_input_option="USER_ENTERED")
+            лог.info("СКЛАД очищен и перезаписан, строк данных: %d", len(данные))
+            return
+
+        # Если пустых не было — просто проверяем что формулы есть
+        # (на случай если H пустой в строках с данными)
+        for i, стр in enumerate(данные, start=2):
+            if len(стр) < 8 or not стр[7]:
+                лист_склад.update_cell(i, 8, f"=SUM(F$2:F{i})-SUM(G$2:G{i})")
+        лог.info("Формулы в СКЛАДЕ проверены")
+
+    except Exception as e:
+        лог.error("Ошибка очистки СКЛАДА: %s", e)
+
 # ─────────────────────────────────────────────
 # Точка входа
 # ─────────────────────────────────────────────
 
 if __name__ == "__main__":
     лог.info("🚀 REESTOR стартует")
+    почистить_склад()
     app = ApplicationBuilder().token(ТОКЕН).build()
 
     app.add_handler(CommandHandler("start",   cmd_старт))
+    app.add_handler(CommandHandler("fix",      cmd_fix))
     app.add_handler(CommandHandler("ostatki", cmd_остатки))
     app.add_handler(CommandHandler("balance", cmd_прибыль))
     app.add_handler(CommandHandler("history", cmd_история))

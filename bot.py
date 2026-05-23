@@ -117,15 +117,22 @@ def find_product(name):
             timeout=10
         )
         d = r.json()
-        if d.get("found"):
+
+        # гибкая проверка
+        if d.get("found") or d.get("success"):
             return d
     except:
         pass
 
     try:
         r = requests.get(SHOP_URL, timeout=10)
-        for p in r.json().get("products", []):
-            if name.lower() in p["name"].lower():
+        data = r.json()
+
+        products = data.get("products") or data.get("data") or []
+
+        for p in products:
+            pname = p.get("name", "").lower()
+            if name.lower() in pname or pname in name.lower():
                 return {
                     "found": True,
                     "productName": p["name"],
@@ -133,8 +140,8 @@ def find_product(name):
                     "cost": p.get("cost", 0),
                     "stock": p.get("stock", 0)
                 }
-    except:
-        pass
+    except Exception as e:
+        print("SEARCH ERROR:", e)
 
     return {"found": False}
 
@@ -218,21 +225,16 @@ async def message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_duplicate(chat_id, text):
         return
 
-    if text == "📦 Остатки":
-        await update.message.reply_text("Остатки (оставил как у тебя)")
-        return
-
-    if text == "💰 Прибыль":
-        await update.message.reply_text("Прибыль (оставил как у тебя)")
-        return
-
-    if text == "📋 История":
-        await update.message.reply_text("История (оставил как у тебя)")
-        return
-
     data = parse(text)
 
+    # 🔴 DEBUG СЮДА
+    print("INPUT:", text)
+    print("PARSED:", data)
+
     result = process(data)
+
+    # 🔴 И СЮДА
+    print("FOUND:", result)
 
     if not result["ok"]:
         await update.message.reply_text("❌ Товар не найден или ошибка")

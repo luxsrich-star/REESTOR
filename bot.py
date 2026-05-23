@@ -60,9 +60,14 @@ def find_product_on_site(product_name):
 
 def update_stock_on_site(product_name, quantity_change):
     try:
-        r = requests.post(SITE_UPDATE_STOCK, json={"shopSlug": SHOP_SLUG, "productName": product_name, "quantityChange": quantity_change}, timeout=10)
+        r = requests.post(SITE_UPDATE_STOCK, 
+            json={"shopSlug": SHOP_SLUG, "productName": product_name, "quantityChange": quantity_change},
+            headers={"Content-Type": "application/json; charset=utf-8"},
+            timeout=10)
+        print(f"UPDATE: {r.status_code} {r.text}")
         return r.json()
-    except:
+    except Exception as e:
+        print(f"UPDATE ERROR: {e}")
         return {"success": False}
 
 def parse_message(text):
@@ -308,7 +313,7 @@ async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
         client = f" | {row[6]}" if len(row) > 6 and row[6] else ""
         profit = f" | +{row[7]} руб" if len(row) > 7 and row[7] else ""
         msg += f"#{idx} {row[0]} — {row[1]}: {row[2]}, {row[3]} руб × {row[4]} шт{client}{profit}\n"
-    msg += "\nДля удаления нажмите 🗑 Очистить и введите номер строки."
+    msg += "\n🗑 Для удаления: нажмите кнопку 'Очистить' в меню и введите номер."
     await update.message.reply_text(msg)
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):

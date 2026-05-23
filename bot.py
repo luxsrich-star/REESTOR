@@ -182,34 +182,101 @@ def найти_товар(name):
     try:
 
         r = requests.get(
-
             f"{SITE}/find-product",
-
             params={
-
                 "shopSlug": SLUG,
-
                 "productName": name
-
             },
-
             timeout=15
-
         )
 
         data = r.json()
 
-        logging.info(data)
+        if data.get("found"):
+            return data
 
-        return data
+    except Exception as e:
+        logging.error(e)
+
+    # резервный поиск по каталогу
+
+    try:
+
+        r = requests.get(
+            SHOP_URL,
+            timeout=15
+        )
+
+        products = r.json().get(
+            "products",
+            []
+        )
+
+        search = (
+            name
+            .lower()
+            .replace(".", "")
+            .strip()
+        )
+
+        prefixes = [
+            "d l t a ",
+            "dlta ",
+            "d.l.t.a ",
+            "cats will ",
+            "catswill ",
+            "fedors "
+        ]
+
+        for p in products:
+
+            pname = (
+                p["name"]
+                .lower()
+                .replace(".", "")
+            )
+
+            short = pname
+
+            for pref in prefixes:
+
+                if short.startswith(pref):
+
+                    short = short[
+                        len(pref):
+                    ]
+
+            if (
+                search in short
+                or short in search
+                or search in pname
+            ):
+
+                return {
+                    "found": True,
+                    "productId":
+                    p["id"],
+                    "productName":
+                    p["name"],
+                    "price":
+                    p.get(
+                        "price",
+                        0
+                    ),
+                    "currentStock":
+                    p.get(
+                        "stock",
+                        0
+                    )
+                }
 
     except Exception as e:
 
         logging.error(e)
 
-        return {
-            "found": False
-        }
+    return {
+        "found": False
+    }
 
 
 def обновить_сайт(
@@ -254,230 +321,118 @@ def обновить_сайт(
 
 # ================= PARSER =================
 
-def разбор(text):
+data = разбор(text)
 
-    syn = синонимы()
+logging.info(
+    f"INPUT = {text}"
+)
 
-    text = text.strip()
+logging.info(
+    f"PARSED = {data}"
+)
 
-    op = "Продажа"
+site = найти_товар(
+    data["товар"]
+)
 
-    if text.lower().startswith(
-            "закуп"
-    ):
-
-        op = "Закуп"
-
-        text = text[5:].strip()
-
-    supply = None
-
-    if "поставка" in text:
-
-        p = text.split(
-            "поставка"
-        )
-
-        text = p[0].strip()
-
-        right = (
-            p[1]
-            .strip()
-            .split()
-        )
-
-        if right:
-
-            if right[0].isdigit():
-
-                supply = int(
-                    right[0]
-                )
-
-    nums = []
-
-    words = []
-
-    for w in text.split():
-
-        c = (
-            w.replace(
-                "шт",
-                ""
-            )
-            .replace(
-                "штук",
-                ""
-            )
-        )
-
-        if c.isdigit():
-
-            nums.append(
-                int(c)
-            )
-
-        else:
-
-            words.append(w)
-
-    price = (
-        nums[0]
-        if nums
-        else None
-    )
-
-    qty = (
-
-        nums[1]
-
-        if len(nums) > 1
-
-        else 1
-    )
-
-    product = (
-        " ".join(
-            words
-        )
-        .strip()
-    )
-
-    if product.lower() in syn:
-
-        product = syn[
-            product.lower()
-        ]
-
-    return {
-
-        "товар": product,
-
-        "цена": price,
-
-        "количество": qty,
-
-        "операция": op,
-
-        "поставка": supply
-    }
-
-# ================= WRITE =================
-
-def запись(
-        data,
-        site
+if not site.get(
+    "found"
 ):
 
-    op_id = uid()
+    await update.message.reply_text(
 
-    date = сейчас()
+        "❌ Товар не найден\n\n"
+        "Пример:\n"
+        "Adrenaline Апельсин 450 поставка 1"
 
-    qty = data[
+    )
+
+    return
+
+canonical = site[
+    "productName"
+]
+
+data[
+    "товар"
+] = canonical
+
+if data[
+    "цена"
+] is None:
+
+    data[
+        "цена"
+    ] = site.get(
+        "price",
+        0
+    )
+
+delta = (
+
+    -data["количество"]
+
+    if data[
+        "операция"
+    ] == "Продажа"
+
+    else data[
         "количество"
     ]
 
-    приход = (
-        qty
+)
 
-        if data[
-            "операция"
-        ] == "Закуп"
+upd = обновить_сайт(
+    canonical,
+    delta
+)
 
-        else 0
+if not upd.get(
+    "success"
+):
+
+    await update.message.reply_text(
+        "⚠️ Сайт не обновился"
     )
 
-    расход = (
-        qty
+    return
 
-        if data[
-            "операция"
-        ] == "Продажа"
+запись(
+    data,
+    site
+)
 
-        else 0
-    )
-
-    склад.append_row([
-
-        op_id,
-
-        date,
-
-        data[
-            "операция"
-        ],
-
-        data[
-            "поставка"
-        ],
-
-        data[
-            "товар"
-        ],
-
-        приход,
-
-        расход
-
-    ])
-
-    price = data[
-        "цена"
+profit = (
+    data["цена"]
+    * data[
+        "количество"
     ]
+)
 
-    amount = price * qty
+card = (
 
-    фин.append_row([
+    "╔══ REESTOR ══╗\n"
 
-        op_id,
+    f"📦 {canonical}\n"
 
-        date,
+    f"💵 {data['цена']} ₽\n"
 
-        data[
-            "операция"
-        ],
+    f"🔢 x{data['количество']}\n"
 
-        data[
-            "поставка"
-        ],
+    f"📁 Поставка: "
+    f"{data['поставка']}\n"
 
-        data[
-            "товар"
-        ],
+    f"💰 Оборот: "
+    f"{profit} ₽\n"
 
-        amount,
+    f"📦 Остаток: "
+    f"{upd['newStock']}"
 
-        ""
+)
 
-    ])
-
-    ист.append_row([
-
-        op_id,
-
-        date,
-
-        data[
-            "операция"
-        ],
-
-        data[
-            "товар"
-        ],
-
-        price,
-
-        qty,
-
-        data[
-            "поставка"
-        ],
-
-        "",
-
-        ""
-
-    ])
+await update.message.reply_text(
+    card
+)
 
 
 # ================= DELETE =================

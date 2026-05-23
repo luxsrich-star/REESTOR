@@ -239,10 +239,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cost = site_data.get("cost", 0)
     revenue = price * qty
     profit = (price - cost) * qty if cost else 0
-    if update_result.get("success"):
-    new_stock = update_result.get("newStock", site_data.get("currentStock", 0) + qty_change)
-else:
-    new_stock = site_data.get("currentStock", 0)
+   if update_result.get("success"):
+            new_stock = update_result.get("newStock", site_data.get("currentStock", 0) + qty_change)
+        else:
+            new_stock = site_data.get("currentStock", 0)
     
     msg = f"💰 Продажа: {data['товар']}\n💵 Цена: {price} руб × {qty} шт\n📦 Поставка: {data['поставка']}\n"
     if data.get("клиент"):

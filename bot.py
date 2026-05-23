@@ -96,7 +96,6 @@ Return only JSON."""
     return data
 
 def write_to_sheets(data, site_data):
-    print(f"UPDATE RESULT: {update_result}")
     today = datetime.now().strftime("%d.%m.%Y")
     qty = data["количество"]
     if data["операция"] == "Продажа":

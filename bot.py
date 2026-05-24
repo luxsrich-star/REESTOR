@@ -1,287 +1,323 @@
 """
-REESTOR — бот учёта продаж (исправленная версия)
+REESTOR — мультимагазинный бот
+Один бот обслуживает 50+ магазинов.
+Каждый магазин получает свою Google таблицу автоматически.
+Привязка telegramId → shopSlug → spreadsheetId хранится на сайте.
 """
 
-import os
-import re
-import json
-import time
-import random
-import logging
+import os, re, json, time, random, logging
 import requests
 from datetime import datetime
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
-from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler,
-    ContextTypes, filters
-)
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+from googleapiclient.discovery import build
 
 # ─────────────────────────────────────────────
 # Логирование
 # ─────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 лог = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────
 # Конфигурация
 # ─────────────────────────────────────────────
-ТОКЕН      = os.environ["TELEGRAM_TOKEN"]
-ТАБЛИЦА_ID = os.environ["SPREADSHEET_ID"]
-GOOGLE_KEY = json.loads(os.environ["GDRIVE_CREDENTIALS"])
-SLUG       = os.environ.get("SHOP_SLUG", "shop")
-САЙТ       = "https://b2bshopb2b.up.railway.app/api/admin"
-МАГАЗИН    = f"https://b2bshopb2b.up.railway.app/api/shop/{SLUG}"
+ТОКЕН       = os.environ["TELEGRAM_TOKEN"]
+GOOGLE_KEY  = json.loads(os.environ["GDRIVE_CREDENTIALS"])
+САЙТ        = os.environ.get("SITE_URL", "https://b2bshopb2b.up.railway.app") + "/api/admin"
+
+_SCOPE = [
+    "https://spreadsheets.google.com/feeds",
+    "https://www.googleapis.com/auth/drive",
+]
 
 # ─────────────────────────────────────────────
-# Google Sheets
+# Google авторизация (одна на весь бот)
 # ─────────────────────────────────────────────
-_scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-_крред = ServiceAccountCredentials.from_json_keyfile_dict(GOOGLE_KEY, _scope)
-гс = gspread.authorize(_крред)
-кн = гс.open_by_key(ТАБЛИЦА_ID)
-лист_склад   = кн.worksheet("СКЛАД")
-лист_финансы = кн.worksheet("ФИНАНСЫ")
-лист_история = кн.worksheet("ИСТОРИЯ")
-лист_товары  = кн.worksheet("ТОВАРЫ")
+_крред = ServiceAccountCredentials.from_json_keyfile_dict(GOOGLE_KEY, _SCOPE)
+гс     = gspread.authorize(_крред)
+
+# ─────────────────────────────────────────────
+# Кэш подключений к таблицам  { spreadsheetId: {лист_склад, ...} }
+# ─────────────────────────────────────────────
+_кэш_листов: dict = {}
+
+def получить_листы(spreadsheet_id: str) -> dict:
+    """Возвращает кэшированные листы таблицы."""
+    if spreadsheet_id in _кэш_листов:
+        return _кэш_листов[spreadsheet_id]
+    кн = гс.open_by_key(spreadsheet_id)
+    листы = {
+        "склад":   кн.worksheet("СКЛАД"),
+        "финансы": кн.worksheet("ФИНАНСЫ"),
+        "история": кн.worksheet("ИСТОРИЯ"),
+        "товары":  кн.worksheet("ТОВАРЫ"),
+    }
+    _кэш_листов[spreadsheet_id] = листы
+    лог.info("Подключились к таблице %s", spreadsheet_id)
+    return листы
+
+# ─────────────────────────────────────────────
+# Создание новой таблицы для магазина
+# ─────────────────────────────────────────────
+def создать_таблицу(shop_name: str) -> str:
+    """
+    Создаёт новую Google таблицу для магазина.
+    Добавляет все нужные листы с заголовками и формулой остатка.
+    Возвращает spreadsheetId.
+    """
+    drive = build("drive", "v3", credentials=_крред)
+    sheets_svc = build("sheets", "v4", credentials=_крред)
+
+    # Создаём файл через Drive API
+    meta = {
+        "name":     f"REESTOR — {shop_name}",
+        "mimeType": "application/vnd.google-apps.spreadsheet",
+    }
+    файл = drive.files().create(body=meta, fields="id").execute()
+    sid  = файл["id"]
+    лог.info("Создана таблица %s для магазина '%s'", sid, shop_name)
+
+    # Даём доступ сервисному аккаунту (он же уже владелец, но явно добавим)
+    # Если хочешь расшарить конкретному email — раскомментируй:
+    # drive.permissions().create(fileId=sid, body={"type":"user","role":"writer","emailAddress":"you@gmail.com"}).execute()
+
+    # Переименовываем лист по умолчанию и создаём остальные
+    # Сначала получаем id дефолтного листа
+    sp_info = sheets_svc.spreadsheets().get(spreadsheetId=sid).execute()
+    default_sheet_id = sp_info["sheets"][0]["properties"]["sheetId"]
+
+    requests_body = [
+        # Переименовываем Sheet1 → СКЛАД
+        {"updateSheetProperties": {
+            "properties": {"sheetId": default_sheet_id, "title": "СКЛАД"},
+            "fields": "title"
+        }},
+        # Создаём остальные листы
+        {"addSheet": {"properties": {"title": "ФИНАНСЫ"}}},
+        {"addSheet": {"properties": {"title": "ИСТОРИЯ"}}},
+        {"addSheet": {"properties": {"title": "ТОВАРЫ"}}},
+    ]
+
+    sheets_svc.spreadsheets().batchUpdate(
+        spreadsheetId=sid,
+        body={"requests": requests_body}
+    ).execute()
+
+    # Открываем через gspread и пишем заголовки
+    кн = гс.open_by_key(sid)
+
+    склад   = кн.worksheet("СКЛАД")
+    финансы = кн.worksheet("ФИНАНСЫ")
+    история = кн.worksheet("ИСТОРИЯ")
+    товары  = кн.worksheet("ТОВАРЫ")
+
+    склад.append_row(
+        ["UID", "Дата", "Операция", "Поставка", "Товар", "Приход", "Расход", "Остаток"],
+        value_input_option="USER_ENTERED"
+    )
+    финансы.append_row(
+        ["UID", "Дата", "Операция", "Поставка", "Товар", "Сумма", "Комментарий"],
+        value_input_option="USER_ENTERED"
+    )
+    история.append_row(
+        ["UID", "Дата", "Операция", "Товар", "Цена", "Кол-во", "Поставка", "Клиент", "Прибыль"],
+        value_input_option="USER_ENTERED"
+    )
+    товары.append_row(
+        ["Каноническое название", "Синонимы"],
+        value_input_option="USER_ENTERED"
+    )
+
+    # Кэшируем
+    _кэш_листов[sid] = {
+        "склад":   склад,
+        "финансы": финансы,
+        "история": история,
+        "товары":  товары,
+    }
+
+    лог.info("Таблица %s настроена для '%s'", sid, shop_name)
+    return sid
 
 # ─────────────────────────────────────────────
 # Вспомогательные функции
 # ─────────────────────────────────────────────
 def генерировать_uid() -> str:
-    return f"{int(time.time() * 1000)}_{random.randint(1000, 9999)}"
+    return f"{int(time.time()*1000)}_{random.randint(1000,9999)}"
 
 def клавиатура() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup([
         [KeyboardButton("📦 Остатки"), KeyboardButton("💰 Прибыль")],
-        [KeyboardButton("📋 История"), KeyboardButton("🗑 Удалить запись")]
+        [KeyboardButton("📋 История"), KeyboardButton("🗑 Удалить запись")],
     ], resize_keyboard=True)
 
-def загрузить_синонимы() -> dict:
-    """
-    Возвращает словарь: синоним.lower() → каноническое название.
-    Лист ТОВАРЫ: колонка A = каноническое название, колонка B = синонимы через запятую.
-    """
+# ─────────────────────────────────────────────
+# API сайта
+# ─────────────────────────────────────────────
+def апи_проверить_telegram(telegram_id: int) -> dict:
+    """Проверяет привязку и возвращает shopSlug + spreadsheetId."""
+    # Нам нужно перебрать все магазины — но мы не знаем slug по telegramId.
+    # Поэтому check-telegram принимает telegramId без slug — нужен новый эндпоинт,
+    # ИЛИ бот сохраняет slug в context.user_data после первой привязки.
+    # Используем хранилище бота (context.bot_data) как быстрый кэш:
+    return {}  # заглушка — реальная логика ниже через bot_data
+
+def апи_check_telegram(slug: str, telegram_id: int) -> dict:
+    try:
+        r = requests.get(f"{САЙТ}/check-telegram",
+                         params={"slug": slug, "telegramId": telegram_id}, timeout=10)
+        if r.status_code == 200:
+            return r.json()
+    except Exception as e:
+        лог.error("check-telegram: %s", e)
+    return {"success": False}
+
+def апи_check_bot_access(slug: str, access_code: str, verify_code: str) -> dict:
+    try:
+        r = requests.get(f"{САЙТ}/check-bot-access",
+                         params={"slug": slug, "accessCode": access_code, "verifyCode": verify_code},
+                         timeout=10)
+        if r.status_code == 200:
+            return r.json()
+    except Exception as e:
+        лог.error("check-bot-access: %s", e)
+    return {"success": False, "error": "network_error"}
+
+def апи_bind_telegram(slug: str, telegram_id: int, spreadsheet_id: str) -> dict:
+    try:
+        r = requests.post(f"{САЙТ}/bind-telegram",
+                          json={"shopSlug": slug, "telegramId": telegram_id,
+                                "spreadsheetId": spreadsheet_id},
+                          headers={"Content-Type": "application/json"}, timeout=10)
+        if r.status_code == 200:
+            return r.json()
+    except Exception as e:
+        лог.error("bind-telegram: %s", e)
+    return {"success": False}
+
+def апи_найти_товар(slug: str, название: str) -> dict:
+    try:
+        r = requests.get(f"{САЙТ}/find-product",
+                         params={"shopSlug": slug, "productName": название}, timeout=10)
+        if r.status_code == 200:
+            д = r.json()
+            if д.get("found"):
+                return д
+    except Exception as e:
+        лог.error("find-product: %s", e)
+    return {"found": False}
+
+def апи_обновить_остаток(slug: str, название: str, изменение: int) -> dict:
+    тело = {"shopSlug": slug, "productName": название, "quantityChange": изменение}
+    try:
+        r = requests.post(f"{САЙТ}/update-stock",
+                          data=json.dumps(тело, ensure_ascii=False).encode("utf-8"),
+                          headers={"Content-Type": "application/json; charset=utf-8"},
+                          timeout=10)
+        if r.status_code == 200:
+            return r.json()
+        return {"success": False, "error": f"http_{r.status_code}"}
+    except Exception as e:
+        лог.error("update-stock: %s", e)
+        return {"success": False, "error": str(e)}
+
+def апи_каталог_магазина(slug: str) -> dict:
+    try:
+        r = requests.get(
+            f"{os.environ.get('SITE_URL','https://b2bshopb2b.up.railway.app')}/api/shop/{slug}",
+            timeout=10)
+        if r.status_code == 200:
+            return r.json()
+    except Exception as e:
+        лог.error("catalog: %s", e)
+    return {}
+
+# ─────────────────────────────────────────────
+# Контекст магазина из bot_data
+# ─────────────────────────────────────────────
+def получить_контекст(bot_data: dict, telegram_id: int) -> dict | None:
+    """Возвращает {slug, spreadsheetId, shopName} или None."""
+    return bot_data.get(f"shop_{telegram_id}")
+
+def сохранить_контекст(bot_data: dict, telegram_id: int, slug: str,
+                        spreadsheet_id: str, shop_name: str):
+    bot_data[f"shop_{telegram_id}"] = {
+        "slug":          slug,
+        "spreadsheetId": spreadsheet_id,
+        "shopName":      shop_name,
+    }
+
+# ─────────────────────────────────────────────
+# Парсинг сообщения
+# ─────────────────────────────────────────────
+def загрузить_синонимы(листы: dict) -> dict:
     результат: dict = {}
     try:
-        строки = лист_товары.get_all_values()
-        for стр in строки[1:]:  # пропускаем заголовок
+        строки = листы["товары"].get_all_values()
+        for стр in строки[1:]:
             if not стр or not стр[0].strip():
                 continue
             канон = стр[0].strip()
-            # само каноническое название тоже добавляем
             результат[канон.lower()] = канон
-            # синонимы из колонки B
             if len(стр) > 1 and стр[1].strip():
-                for синоним in стр[1].split(","):
-                    с = синоним.strip()
+                for с in стр[1].split(","):
+                    с = с.strip()
                     if с:
                         результат[с.lower()] = канон
     except Exception as e:
-        лог.error("Ошибка загрузки синонимов: %s", e)
+        лог.error("загрузить_синонимы: %s", e)
     return результат
 
 def найти_канон(текст: str, синонимы: dict) -> str | None:
-    """
-    Ищет каноническое название по тексту.
-    Сначала точное совпадение, потом вхождение подстроки.
-    Возвращает каноническое имя или None.
-    """
-    текст_л = текст.lower().strip()
-
-    # 1. Точное совпадение
-    if текст_л in синонимы:
-        return синонимы[текст_л]
-
-    # 2. Ищем синоним который целиком входит в текст пользователя
-    лучший = None
-    лучшая_длина = 0
+    тл = текст.lower().strip()
+    if тл in синонимы:
+        return синонимы[тл]
+    лучший, лучшая_длина = None, 0
     for синоним, канон in синонимы.items():
-        if синоним in текст_л and len(синоним) > лучшая_длина:
-            лучший = канон
-            лучшая_длина = len(синоним)
-
+        if синоним in тл and len(синоним) > лучшая_длина:
+            лучший, лучшая_длина = канон, len(синоним)
     return лучший
 
-# ─────────────────────────────────────────────
-# Парсинг сообщения  (ИСПРАВЛЕНО)
-# ─────────────────────────────────────────────
-def разобрать_сообщение(текст: str) -> dict:
-    """
-    Формат (регистр не важен):
-      [закуп] <название> <цена> [<кол>шт] [поставка <N>]
-
-    Алгоритм:
-    1. Определяем операцию (Закуп / Продажа).
-    2. Вырезаем «поставка N» из конца.
-    3. Регуляркой находим все числа в строке.
-       Первое число — цена, второе (если есть) — количество.
-    4. Всё что не число и не «шт/штук» — название товара.
-    5. По названию ищем канонический товар через синонимы.
-    """
-    синонимы = загрузить_синонимы()
+def разобрать_сообщение(текст: str, листы: dict) -> dict:
+    синонимы = загрузить_синонимы(листы)
     текст = текст.strip()
-
-    # --- операция ---
     операция = "Продажа"
-    тл = текст.lower()
-    if тл.startswith("закуп"):
+    if текст.lower().startswith("закуп"):
         операция = "Закуп"
         текст = текст[5:].strip()
 
-    # --- поставка ---
     поставка = None
     м = re.search(r'поставка\s+(\d+)', текст, re.IGNORECASE)
     if м:
         поставка = int(м.group(1))
         текст = текст[:м.start()].strip()
 
-    # --- все числа в строке (включая «2шт», «500») ---
-    # Находим все токены-числа с необязательным суффиксом "шт/штук/штуки"
-    числа = []
-    # регулярка: число, за которым может идти необязательный суффикс шт/штук/штуки
-    for м2 in re.finditer(r'\b(\d+)\s*(?:штук[иа]?|шт\.?)?\b', текст, re.IGNORECASE):
-        числа.append(int(м2.group(1)))
-
-    цена     = числа[0] if len(числа) >= 1 else None
+    числа = [int(м2.group(1)) for м2 in
+              re.finditer(r'\b(\d+)\s*(?:штук[иа]?|шт\.?)?\b', текст, re.IGNORECASE)]
+    цена       = числа[0] if числа else None
     количество = числа[1] if len(числа) >= 2 else 1
 
-    # --- название товара: убираем числа и слова-маркеры ---
     название_сырое = re.sub(r'\b\d+\s*(?:штук[иа]?|шт\.?)?\b', '', текст, flags=re.IGNORECASE)
     название_сырое = re.sub(r'\s{2,}', ' ', название_сырое).strip()
 
-    лог.info("Парсинг: операция=%s сырое_название=%r цена=%s кол=%s поставка=%s",
-             операция, название_сырое, цена, количество, поставка)
-
-    # --- ищем канон ---
     канон = найти_канон(название_сырое, синонимы)
-    лог.info("Канон из синонимов: %r → %r", название_сырое, канон)
 
     return {
-        "uid":       генерировать_uid(),
-        "операция":  операция,
-        "товар":     канон or название_сырое,  # если не нашли — оставляем как есть
+        "uid":          генерировать_uid(),
+        "операция":     операция,
+        "товар":        канон or название_сырое,
         "канон_найден": канон is not None,
-        "цена":      цена,
-        "количество": количество,
-        "поставка":  поставка,
-        "клиент":    None,
+        "цена":         цена,
+        "количество":   количество,
+        "поставка":     поставка,
     }
-
-# ─────────────────────────────────────────────
-# API сайта
-# ─────────────────────────────────────────────
-def апи_найти_товар(название: str) -> dict:
-    """Найти товар через /find-product."""
-    try:
-        url = f"{САЙТ}/find-product"
-        params = {"shopSlug": SLUG, "productName": название}
-        лог.info("find-product → %s %s", url, params)
-        r = requests.get(url, params=params, timeout=10)
-        лог.info("find-product ← %d %s", r.status_code, r.text[:300])
-        if r.status_code == 200:
-            д = r.json()
-            if д.get("found"):
-                return д
-    except Exception as e:
-        лог.error("find-product exception: %s", e)
-
-    # Fallback: перебор каталога магазина
-    try:
-        лог.info("shop fallback → %s", МАГАЗИН)
-        r = requests.get(МАГАЗИН, timeout=10)
-        лог.info("shop fallback ← %d", r.status_code)
-        if r.status_code == 200:
-            для_сравн = название.lower()
-            for т in r.json().get("products", []):
-                if для_сравн in т["name"].lower() or т["name"].lower() in для_сравн:
-                    лог.info("Совпадение по каталогу: %s", т["name"])
-                    return {
-                        "found":        True,
-                        "productId":    т.get("id", ""),
-                        "productName":  т["name"],
-                        "price":        т.get("price", 0),
-                        "cost":         т.get("cost", 0),
-                        "currentStock": т.get("stock", 0),
-                    }
-    except Exception as e:
-        лог.error("shop fallback exception: %s", e)
-
-    return {"found": False}
-
-def апи_обновить_остаток(название: str, изменение: int) -> dict:
-    """POST /update-stock."""
-    тело = {"shopSlug": SLUG, "productName": название, "quantityChange": изменение}
-    лог.info("update-stock → productName=%r quantityChange=%d", название, изменение)
-    try:
-        payload = json.dumps(тело, ensure_ascii=False).encode("utf-8")
-        r = requests.post(
-            f"{САЙТ}/update-stock",
-            data=payload,
-            headers={"Content-Type": "application/json; charset=utf-8"},
-            timeout=10
-        )
-        лог.info("update-stock ← %d | %s", r.status_code, r.text[:300])
-        if r.status_code == 200:
-            return r.json()
-        return {"success": False, "error": f"http_{r.status_code}", "body": r.text[:200]}
-    except Exception as e:
-        лог.error("update-stock exception: %s", e)
-        return {"success": False, "error": str(e)}
-
-def апи_проверить_telegram(telegram_id: int) -> dict:
-    try:
-        r = requests.get(
-            f"{САЙТ}/check-telegram",
-            params={"slug": SLUG, "telegramId": telegram_id},
-            timeout=10
-        )
-        if r.status_code == 200:
-            return r.json()
-    except Exception as e:
-        лог.error("check-telegram exception: %s", e)
-    return {"success": False}
-
-def апи_проверить_доступ(slug: str, access_code: str, verify_code: str) -> dict:
-    try:
-        r = requests.get(
-            f"{САЙТ}/check-bot-access",
-            params={"slug": slug, "accessCode": access_code, "verifyCode": verify_code},
-            timeout=10
-        )
-        if r.status_code == 200:
-            return r.json()
-    except Exception as e:
-        лог.error("check-bot-access exception: %s", e)
-    return {"success": False, "error": "network_error"}
-
-def апи_привязать_telegram(slug: str, telegram_id: int) -> dict:
-    try:
-        r = requests.post(
-            f"{САЙТ}/bind-telegram",
-            json={"shopSlug": slug, "telegramId": telegram_id},
-            headers={"Content-Type": "application/json; charset=utf-8"},
-            timeout=10
-        )
-        if r.status_code == 200:
-            return r.json()
-    except Exception as e:
-        лог.error("bind-telegram exception: %s", e)
-    return {"success": False}
 
 # ─────────────────────────────────────────────
 # Запись в Google Sheets
 # ─────────────────────────────────────────────
-def записать_операцию(д: dict, сайт_данные: dict) -> None:
-    """
-    СКЛАД:   A:UID | B:Дата | C:Операция | D:Поставка | E:Товар | F:Приход | G:Расход | H:Остаток(формула)
-    ФИНАНСЫ: A:UID | B:Дата | C:Операция | D:Поставка | E:Товар | F:Сумма   | G:Комментарий
-    ИСТОРИЯ: A:UID | B:Дата | C:Операция | D:Товар    | E:Цена  | F:Кол-во | G:Поставка | H:Клиент | I:Прибыль
-    """
+def записать_операцию(листы: dict, д: dict, сайт_данные: dict):
     сег  = datetime.now().strftime("%d.%m.%Y")
     uid  = д["uid"]
     опер = д["операция"]
@@ -290,330 +326,278 @@ def записать_операцию(д: dict, сайт_данные: dict) -> 
     цена = д["цена"] or сайт_данные.get("price", 0)
     себ  = сайт_данные.get("cost", 0)
     пост = д["поставка"]
-    кл   = д.get("клиент") or ""
 
-    лог.info("записать_операцию: uid=%s op=%s товар=%r кол=%d", uid, опер, тов, кол)
+    все = листы["склад"].get_all_values()
+    след = len(все) + 1
 
-    # Определяем номер следующей строки в СКЛАДЕ для формулы остатка
-    все_строки_склад = лист_склад.get_all_values()
-    след_строка = len(все_строки_склад) + 1  # следующая строка после всех существующих
-
-    # СКЛАД (8 столбцов, H — формула остатка)
     if опер == "Продажа":
         строка_склад = [uid, сег, "Продажа", пост, тов, 0, кол,
-                        f"=SUM(F$2:F{след_строка})-SUM(G$2:G{след_строка})"]
+                        f"=SUM(F$2:F{след})-SUM(G$2:G{след})"]
     else:
         строка_склад = [uid, сег, "Закуп", пост, тов, кол, 0,
-                        f"=SUM(F$2:F{след_строка})-SUM(G$2:G{след_строка})"]
+                        f"=SUM(F$2:F{след})-SUM(G$2:G{след})"]
 
-    лист_склад.append_row(строка_склад, value_input_option="USER_ENTERED")
+    листы["склад"].append_row(строка_склад, value_input_option="USER_ENTERED")
 
-    # ФИНАНСЫ
+    оборот = цена * кол
+    приб   = (цена - себ) * кол if себ else 0
     if опер == "Продажа":
-        оборот = цена * кол
-        приб   = (цена - себ) * кол if себ else 0
-        лист_финансы.append_row([uid, сег, "Продажа", пост, тов, оборот, f"Прибыль: {приб}"])
+        листы["финансы"].append_row([uid, сег, "Продажа", пост, тов, оборот, f"Прибыль: {приб}"])
     else:
-        лист_финансы.append_row([uid, сег, "Закуп", пост, тов, -(цена * кол), ""])
+        листы["финансы"].append_row([uid, сег, "Закуп", пост, тов, -(цена * кол), ""])
 
-    # ИСТОРИЯ
     чистая = ((цена - себ) * кол) if (себ and опер == "Продажа") else ""
-    лист_история.append_row([uid, сег, опер, тов, цена, кол, пост, кл, чистая])
+    листы["история"].append_row([uid, сег, опер, тов, цена, кол, пост, "", чистая])
 
-def удалить_по_uid(uid: str) -> tuple[bool, str]:
-    """Удаляет строку с данным UID из ИСТОРИИ, СКЛАДА и ФИНАНСОВ, откатывает сайт."""
-    ист_данные = лист_история.get_all_values()
-    номер_строки_ист = None
-    инфо_операция = ""
-    инфо_товар    = ""
-    инфо_кол      = 1
-
-    for i, стр in enumerate(ист_данные):
+def удалить_по_uid(листы: dict, slug: str, uid: str) -> tuple[bool, str]:
+    ист = листы["история"].get_all_values()
+    номер, инфо_оп, инфо_тов, инфо_кол = None, "", "", 1
+    for i, стр in enumerate(ист):
         if стр and стр[0] == uid:
-            номер_строки_ист = i + 1
-            инфо_операция    = стр[2] if len(стр) > 2 else ""
-            инфо_товар       = стр[3] if len(стр) > 3 else ""
-            инфо_кол         = int(стр[5]) if len(стр) > 5 and стр[5].isdigit() else 1
+            номер    = i + 1
+            инфо_оп  = стр[2] if len(стр) > 2 else ""
+            инфо_тов = стр[3] if len(стр) > 3 else ""
+            инфо_кол = int(стр[5]) if len(стр) > 5 and стр[5].isdigit() else 1
             break
+    if номер is None:
+        return False, "UID не найден"
 
-    if номер_строки_ист is None:
-        return False, "UID не найден в ИСТОРИИ"
+    for л in ["склад", "финансы"]:
+        for i, стр in enumerate(листы[л].get_all_values()):
+            if стр and стр[0] == uid:
+                листы[л].delete_rows(i + 1)
+                break
+    листы["история"].delete_rows(номер)
 
-    # СКЛАД
-    for i, стр in enumerate(лист_склад.get_all_values()):
-        if стр and стр[0] == uid:
-            лист_склад.delete_rows(i + 1)
-            break
-
-    # ФИНАНСЫ
-    for i, стр in enumerate(лист_финансы.get_all_values()):
-        if стр and стр[0] == uid:
-            лист_финансы.delete_rows(i + 1)
-            break
-
-    # ИСТОРИЯ (последней чтобы индексы не сместились)
-    лист_история.delete_rows(номер_строки_ист)
-
-    # Откат на сайте
-    изм_откат = инфо_кол if инфо_операция == "Продажа" else -инфо_кол
-    рез = апи_обновить_остаток(инфо_товар, изм_откат)
-    if not рез.get("success"):
-        лог.warning("Не удалось откатить сайт при удалении uid=%s: %s", uid, рез)
-
-    return True, инфо_товар
+    изм = инфо_кол if инфо_оп == "Продажа" else -инфо_кол
+    апи_обновить_остаток(slug, инфо_тов, изм)
+    return True, инфо_тов
 
 # ─────────────────────────────────────────────
 # Обработчики Telegram
 # ─────────────────────────────────────────────
 async def cmd_старт(update: Update, context: ContextTypes.DEFAULT_TYPE):
     чат = update.effective_chat.id
-    рез = апи_проверить_telegram(чат)
-    if рез.get("success"):
-        название = рез.get("shopName", SLUG)
-        await update.message.reply_text(
-            f"👋 С возвращением! Магазин: *{название}*",
-            parse_mode="Markdown",
-            reply_markup=клавиатура()
-        )
-        return
+
+    # Проверяем кэш бота
+    кнт = получить_контекст(context.bot_data, чат)
+    if кнт:
+        # Перепроверяем через сайт (актуальна ли привязка)
+        рез = апи_check_telegram(кнт["slug"], чат)
+        if рез.get("success"):
+            await update.message.reply_text(
+                f"👋 С возвращением! Магазин: *{кнт['shopName']}*",
+                parse_mode="Markdown", reply_markup=клавиатура())
+            return
+
+    # Нет в кэше — начинаем авторизацию
     context.user_data.clear()
     context.user_data["шаг"] = "slug"
-    await update.message.reply_text("🔐 Введите slug магазина:")
-
-async def cmd_остатки(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await показать_остатки(update)
-
-async def cmd_прибыль(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await показать_прибыль(update)
-
-async def cmd_история(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await показать_историю(update)
-
-async def cmd_помощь(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    текст = (
-        "ℹ️ *Формат продажи:*\n"
-        "`Название цена [кол-во шт] [поставка N]`\n\n"
-        "Примеры:\n"
-        "• `Adrenaline Апельсин 450`\n"
-        "• `адреналин апельсин 450 2шт поставка 3`\n"
-        "• `закуп DLTA мята 300 10шт поставка 1`\n\n"
-        "Кнопки меню — остатки, прибыль, история, удаление.\n"
-        "Названия товаров берутся из листа ТОВАРЫ (колонка Синонимы)."
-    )
-    await update.message.reply_text(текст, parse_mode="Markdown")
+    await update.message.reply_text(
+        "👋 Добро пожаловать в REESTOR!\n\nВведите *slug* вашего магазина:",
+        parse_mode="Markdown")
 
 async def обработать_сообщение(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    чат  = update.effective_chat.id
+    чат   = update.effective_chat.id
     текст = update.message.text.strip()
-    шаг  = context.user_data.get("шаг")
+    шаг   = context.user_data.get("шаг")
 
-    # ── Кнопки меню ──
-    if текст == "📦 Остатки":
-        await показать_остатки(update)
-        return
-    if текст == "💰 Прибыль":
-        await показать_прибыль(update)
-        return
-    if текст == "📋 История":
-        await показать_историю(update)
-        return
-    if текст == "🗑 Удалить запись":
-        context.user_data["шаг"] = "del_uid"
-        await update.message.reply_text("Введите UID операции (из истории, начинается с цифр):")
+    # ── Кнопки меню ──────────────────────────────────────────────────────────
+    if текст in ("📦 Остатки", "💰 Прибыль", "📋 История", "🗑 Удалить запись"):
+        кнт = получить_контекст(context.bot_data, чат)
+        if not кнт:
+            await update.message.reply_text("❌ Сначала войдите: /start")
+            return
+        if текст == "📦 Остатки":
+            await показать_остатки(update, кнт["slug"])
+        elif текст == "💰 Прибыль":
+            await показать_прибыль(update, получить_листы(кнт["spreadsheetId"]))
+        elif текст == "📋 История":
+            await показать_историю(update, получить_листы(кнт["spreadsheetId"]))
+        elif текст == "🗑 Удалить запись":
+            context.user_data["шаг"] = "del_uid"
+            await update.message.reply_text("Введите UID операции:")
         return
 
-    # ── Удаление по UID ──
+    # ── Удаление ──────────────────────────────────────────────────────────────
     if шаг == "del_uid":
         context.user_data.pop("шаг", None)
-        успех, сообщение = удалить_по_uid(текст)
-        if успех:
-            await update.message.reply_text(f"✅ Запись удалена. Товар: {сообщение}")
-        else:
-            await update.message.reply_text(f"❌ Ошибка: {сообщение}")
+        кнт = получить_контекст(context.bot_data, чат)
+        if not кнт:
+            await update.message.reply_text("❌ Сначала войдите: /start")
+            return
+        успех, сообщение = удалить_по_uid(
+            получить_листы(кнт["spreadsheetId"]), кнт["slug"], текст)
+        await update.message.reply_text(
+            f"✅ Удалено: {сообщение}" if успех else f"❌ {сообщение}")
         return
 
-    # ── Авторизация ──
+    # ── Авторизация ──────────────────────────────────────────────────────────
     if шаг == "slug":
-        context.user_data["slug_введён"] = текст
-        context.user_data["шаг"] = "access_code"
-        await update.message.reply_text("🔑 Введите код доступа:")
+        context.user_data["slug"] = текст.strip().lower()
+        context.user_data["шаг"]  = "access_code"
+        await update.message.reply_text("🔑 Введите код доступа (8 символов):")
         return
 
     if шаг == "access_code":
-        context.user_data["ac"] = текст
+        context.user_data["ac"]  = текст.strip()
         context.user_data["шаг"] = "verify_code"
-        await update.message.reply_text("🔢 Введите код подтверждения:")
+        await update.message.reply_text("🔢 Введите код подтверждения (4 цифры):")
         return
 
     if шаг == "verify_code":
-        slug = context.user_data.get("slug_введён", SLUG)
+        slug = context.user_data.get("slug", "")
         ac   = context.user_data.get("ac", "")
-        vc   = текст
-        рез  = апи_проверить_доступ(slug, ac, vc)
-        if рез.get("success"):
-            апи_привязать_telegram(slug, чат)
+        vc   = текст.strip()
+
+        рез = апи_check_bot_access(slug, ac, vc)
+        if not рез.get("success"):
             context.user_data.clear()
             await update.message.reply_text(
-                f"✅ Доступ разрешён! Магазин: *{рез.get('shopName', slug)}*",
-                parse_mode="Markdown",
-                reply_markup=клавиатура()
-            )
-        else:
-            context.user_data.clear()
-            await update.message.reply_text(
-                f"❌ Ошибка: {рез.get('error', 'неизвестная ошибка')}. Начните заново: /start"
-            )
-        return
+                f"❌ Ошибка: {рез.get('error','неизвестно')}. Начните заново: /start")
+            return
 
-    # ── Основная логика: продажа / закуп ──
-    данные = разобрать_сообщение(текст)
+        shop_name = рез.get("shopName", slug)
+        await update.message.reply_text("⏳ Создаю таблицу для вашего магазина...")
 
-    if not данные["товар"]:
-        await update.message.reply_text("❌ Не удалось распознать название товара.")
-        return
+        try:
+            sid = создать_таблицу(shop_name)
+        except Exception as e:
+            лог.error("создать_таблицу: %s", e)
+            await update.message.reply_text(f"❌ Ошибка создания таблицы: {e}")
+            return
 
-    # Если синоним не найден в таблице — предупреждаем, но всё равно пробуем найти на сайте
-    if not данные["канон_найден"]:
-        лог.warning("Синоним не найден в ТОВАРЫ для: %r", данные["товар"])
+        привязка = апи_bind_telegram(slug, чат, sid)
+        if not привязка.get("success"):
+            await update.message.reply_text("⚠️ Таблица создана, но не удалось привязать к сайту.")
+            return
 
-    # Ищем товар на сайте
-    сайт = апи_найти_товар(данные["товар"])
+        сохранить_контекст(context.bot_data, чат, slug, sid, shop_name)
+        context.user_data.clear()
 
-    if not сайт.get("found"):
         await update.message.reply_text(
-            f"❌ Товар «{данные['товар']}» не найден на сайте.\n"
-            "Проверьте синонимы в листе ТОВАРЫ или название товара на сайте."
-        )
+            f"✅ Готово! Магазин *{shop_name}* подключён.\n"
+            f"📊 Ваша таблица создана автоматически.\n\n"
+            f"Заполните лист *ТОВАРЫ* — добавьте названия товаров и синонимы.\n"
+            f"После этого можно вносить продажи!",
+            parse_mode="Markdown", reply_markup=клавиатура())
         return
 
-    # Берём каноническое имя с сайта (самое точное)
-    данные["товар"] = сайт.get("productName", данные["товар"])
+    # ── Повторный вход (уже привязан, но нет в кэше) ─────────────────────────
+    if шаг is None:
+        кнт = получить_контекст(context.bot_data, чат)
+        if not кнт:
+            # Может быть бот перезапустился — попробуем восстановить через сайт
+            # Не знаем slug — просим заново
+            await update.message.reply_text(
+                "Введите /start для начала работы.")
+            return
 
-    if данные["цена"] is None:
-        данные["цена"] = сайт.get("price", 0)
+        # ── Основная логика: продажа / закуп ─────────────────────────────────
+        slug = кнт["slug"]
+        листы = получить_листы(кнт["spreadsheetId"])
+        данные = разобрать_сообщение(текст, листы)
 
-    кол  = данные["количество"]
-    опер = данные["операция"]
-    изм  = -кол if опер == "Продажа" else кол
+        if not данные["товар"]:
+            await update.message.reply_text("❌ Не распознал название товара.")
+            return
 
-    # Обновляем остаток на сайте
-    рез_сайт = апи_обновить_остаток(данные["товар"], изм)
+        сайт = апи_найти_товар(slug, данные["товар"])
+        if not сайт.get("found"):
+            await update.message.reply_text(
+                f"❌ Товар «{данные['товар']}» не найден на сайте.\n"
+                f"Проверьте синонимы в листе ТОВАРЫ.")
+            return
 
-    # Записываем в таблицы
-    записать_операцию(данные, сайт)
+        данные["товар"] = сайт.get("productName", данные["товар"])
+        if данные["цена"] is None:
+            данные["цена"] = сайт.get("price", 0)
 
-    # Актуальный остаток после обновления
-    актуал  = апи_найти_товар(данные["товар"])
-    остаток = актуал.get("currentStock", рез_сайт.get("newStock", "?"))
+        кол  = данные["количество"]
+        опер = данные["операция"]
+        изм  = -кол if опер == "Продажа" else кол
 
-    # Формируем ответ
-    цена  = данные["цена"]
-    себ   = сайт.get("cost", 0)
-    оборот = цена * кол
-    приб   = (цена - себ) * кол if себ else None
-    эмодзи = "💰" if опер == "Продажа" else "📥"
+        рез_сайт = апи_обновить_остаток(slug, данные["товар"], изм)
+        записать_операцию(листы, данные, сайт)
 
-    ответ = (
-        f"{эмодзи} *{опер}*: {данные['товар']}\n"
-        f"💵 Цена: {цена} руб × {кол} шт\n"
-    )
-    if данные["поставка"]:
-        ответ += f"📋 Поставка: {данные['поставка']}\n"
-    if опер == "Продажа":
-        ответ += f"🛒 Оборот: {оборот} руб\n"
-        if приб is not None:
-            ответ += f"🟢 Чистая прибыль: {приб} руб\n"
-    ответ += f"📦 Остаток: {остаток} шт"
+        актуал  = апи_найти_товар(slug, данные["товар"])
+        остаток = актуал.get("currentStock", рез_сайт.get("newStock", "?"))
 
-    if not рез_сайт.get("success"):
-        ответ += f"\n⚠️ Сайт не обновлён: {рез_сайт.get('error', '?')}"
+        цена  = данные["цена"]
+        себ   = сайт.get("cost", 0)
+        приб  = (цена - себ) * кол if (себ and опер == "Продажа") else None
+        эм    = "💰" if опер == "Продажа" else "📥"
 
-    await update.message.reply_text(ответ, parse_mode="Markdown")
+        ответ = (f"{эм} *{опер}*: {данные['товар']}\n"
+                 f"💵 {цена} руб × {кол} шт\n")
+        if данные["поставка"]:
+            ответ += f"📋 Поставка: {данные['поставка']}\n"
+        if опер == "Продажа":
+            ответ += f"🛒 Оборот: {цена*кол} руб\n"
+            if приб is not None:
+                ответ += f"🟢 Прибыль: {приб} руб\n"
+        ответ += f"📦 Остаток: {остаток} шт"
+
+        if not рез_сайт.get("success"):
+            ответ += f"\n⚠️ Сайт не обновлён: {рез_сайт.get('error','?')}"
+
+        await update.message.reply_text(ответ, parse_mode="Markdown")
 
 # ─────────────────────────────────────────────
 # Просмотровые функции
 # ─────────────────────────────────────────────
-async def показать_остатки(update: Update):
+async def показать_остатки(update: Update, slug: str):
     try:
-        r = requests.get(МАГАЗИН, timeout=10)
-        if r.status_code != 200:
-            await update.message.reply_text("⚠️ Не удалось загрузить остатки (ошибка сайта)")
-            return
-
-        д      = r.json()
+        д      = апи_каталог_магазина(slug)
         товары = д.get("products", [])
         кат    = {к["id"]: к["name"] for к in д.get("categories", [])}
-        родит  = {к["id"]: к["parentId"] for к in д.get("categories", []) if к.get("parentId")}
-
         группы: dict = {}
         for т in товары:
             if т.get("hidden"):
                 continue
-            кат_ид  = т.get("categoryId", "")
-            кат_имя = кат.get(кат_ид, "Другое")
-            пар_ид  = родит.get(кат_ид)
-            если_ест = f" ({кат.get(пар_ид)})" if пар_ид and пар_ид in кат else ""
-            заголовок = f"{кат_имя}{если_ест}"
-
+            заг = кат.get(т.get("categoryId",""), "Другое")
             назв = т["name"]
-            for пр in ["D.L.T.A. ", "DLTA ", "CATS WILL ", "CATSWILL ", "Fedors ", "Fedrs "]:
-                if назв.startswith(пр):
-                    назв = назв[len(пр):]
-                    break
-
-            группы.setdefault(заголовок, []).append(
-                f"• {назв.strip()} — {т['stock']} шт | {т['price']} руб"
-            )
-
+            группы.setdefault(заг, []).append(
+                f"• {назв} — {т['stock']} шт | {т.get('price',0)} руб")
         if not группы:
             await update.message.reply_text("📦 Склад пуст")
             return
-
         ответ = "📦 *ОСТАТКИ:*\n"
         for заг, стр in sorted(группы.items()):
             ответ += f"\n📌 {заг}\n" + "\n".join(стр) + "\n"
-
         await update.message.reply_text(ответ, parse_mode="Markdown")
     except Exception as e:
         лог.error("показать_остатки: %s", e)
         await update.message.reply_text("⚠️ Не удалось загрузить остатки")
 
-async def показать_прибыль(update: Update):
+async def показать_прибыль(update: Update, листы: dict):
     try:
-        строки = лист_финансы.get_all_values()
-        итог   = 0.0
-        for стр in строки[1:]:
-            if len(стр) > 5 and стр[5]:
-                try:
-                    итог += float(стр[5])
-                except ValueError:
-                    pass
+        строки = листы["финансы"].get_all_values()
+        итог = sum(float(стр[5]) for стр in строки[1:] if len(стр)>5 and стр[5]
+                   and стр[5].replace(".","").replace("-","").isdigit())
         await update.message.reply_text(f"💸 Баланс: {итог:,.0f} руб")
     except Exception as e:
         лог.error("показать_прибыль: %s", e)
         await update.message.reply_text("⚠️ Не удалось получить данные")
 
-async def показать_историю(update: Update):
+async def показать_историю(update: Update, листы: dict):
     try:
-        все_строки = лист_история.get_all_values()
-        данные     = [с for с in все_строки[1:] if с and len(с) >= 6 and с[0]]
-        посл       = данные[-10:] if len(данные) > 10 else данные
-
+        все   = листы["история"].get_all_values()
+        данные = [с for с in все[1:] if с and с[0]]
+        посл  = данные[-10:]
         if not посл:
             await update.message.reply_text("📋 История пуста")
             return
-
         ответ = "📋 *Последние операции:*\n\n"
         for стр in reversed(посл):
             uid  = стр[0]
-            дата = стр[1] if len(стр) > 1 else "?"
-            опер = стр[2] if len(стр) > 2 else "?"
-            тов  = стр[3] if len(стр) > 3 else "?"
-            цена = стр[4] if len(стр) > 4 else "?"
-            кол  = стр[5] if len(стр) > 5 else "?"
-            ответ += f"`{uid}`\n{дата} — {опер}: {тов}, {цена} руб × {кол} шт\n\n"
-
-        ответ += "🗑 Для удаления: кнопка *«Удалить запись»* → введите UID."
+            дата = стр[1] if len(стр)>1 else "?"
+            опер = стр[2] if len(стр)>2 else "?"
+            тов  = стр[3] if len(стр)>3 else "?"
+            цена = стр[4] if len(стр)>4 else "?"
+            кол  = стр[5] if len(стр)>5 else "?"
+            ответ += f"`{uid}`\n{дата} — {опер}: {тов}, {цена}р × {кол}шт\n\n"
+        ответ += "🗑 Удалить: кнопка *«Удалить запись»* → UID"
         await update.message.reply_text(ответ, parse_mode="Markdown")
     except Exception as e:
         лог.error("показать_историю: %s", e)
@@ -623,12 +607,8 @@ async def показать_историю(update: Update):
 # Точка входа
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
-    лог.info("🚀 REESTOR стартует")
+    лог.info("🚀 REESTOR Multi запускается")
     app = ApplicationBuilder().token(ТОКЕН).build()
     app.add_handler(CommandHandler("start",   cmd_старт))
-    app.add_handler(CommandHandler("ostatki", cmd_остатки))
-    app.add_handler(CommandHandler("balance", cmd_прибыль))
-    app.add_handler(CommandHandler("history", cmd_история))
-    app.add_handler(CommandHandler("help",    cmd_помощь))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, обработать_сообщение))
     app.run_polling()

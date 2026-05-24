@@ -1,4 +1,4 @@
-"""
+="""
 REESTOR — мультимагазинный бот
 Один бот обслуживает 50+ магазинов.
 Каждый магазин получает свою Google таблицу автоматически.
@@ -63,56 +63,46 @@ def получить_листы(spreadsheet_id: str) -> dict:
 # ─────────────────────────────────────────────
 def создать_таблицу(shop_name: str) -> str:
     """
-    Создаёт новую Google таблицу для магазина.
-    Добавляет все нужные листы с заголовками и формулой остатка.
+    Создаёт новую Google таблицу для магазина через Sheets API (без Drive квоты).
+    Таблица создаётся на Drive сервисного аккаунта, потом перемещается в папку владельца.
     Возвращает spreadsheetId.
     """
-    drive = build("drive", "v3", credentials=_крред)
-    sheets_svc = build("sheets", "v4", credentials=_крред)
+    ПАПКА_ID = "1l_2cJS1KcLCKFLa-QcWWfLSYd7TWj-1x"
 
-    # Создаём файл через Drive API
-    meta = {
-        "name":     f"REESTOR — {shop_name}",
-        "mimeType": "application/vnd.google-apps.spreadsheet",
-        "parents":  ["1l_2cJS1KcLCKFLa-QcWWfLSYd7TWj-1x"],  # папка на личном Drive
+    sheets_svc = build("sheets", "v4", credentials=_крред)
+    drive      = build("drive",  "v3", credentials=_крред)
+
+    # 1. Создаём таблицу через Sheets API — не занимает Drive квоту сервисного аккаунта
+    тело = {
+        "properties": {"title": f"REESTOR — {shop_name}"},
+        "sheets": [
+            {"properties": {"title": "СКЛАД"}},
+            {"properties": {"title": "ФИНАНСЫ"}},
+            {"properties": {"title": "ИСТОРИЯ"}},
+            {"properties": {"title": "ТОВАРЫ"}},
+        ]
     }
-    файл = drive.files().create(
-        body=meta,
-        fields="id",
-        supportsAllDrives=True,
-    ).execute()
-    sid  = файл["id"]
+    сп = sheets_svc.spreadsheets().create(body=тело, fields="spreadsheetId").execute()
+    sid = сп["spreadsheetId"]
     лог.info("Создана таблица %s для магазина '%s'", sid, shop_name)
 
-    # Даём доступ сервисному аккаунту (он же уже владелец, но явно добавим)
-    # Если хочешь расшарить конкретному email — раскомментируй:
-    # drive.permissions().create(fileId=sid, body={"type":"user","role":"writer","emailAddress":"you@gmail.com"}).execute()
+    # 2. Перемещаем в папку владельца
+    try:
+        файл = drive.files().get(fileId=sid, fields="parents").execute()
+        старые = ",".join(файл.get("parents", []))
+        drive.files().update(
+            fileId=sid,
+            addParents=ПАПКА_ID,
+            removeParents=старые,
+            supportsAllDrives=True,
+            fields="id,parents"
+        ).execute()
+        лог.info("Таблица %s перемещена в папку %s", sid, ПАПКА_ID)
+    except Exception as e:
+        лог.warning("Не удалось переместить таблицу в папку: %s", e)
 
-    # Переименовываем лист по умолчанию и создаём остальные
-    # Сначала получаем id дефолтного листа
-    sp_info = sheets_svc.spreadsheets().get(spreadsheetId=sid).execute()
-    default_sheet_id = sp_info["sheets"][0]["properties"]["sheetId"]
-
-    requests_body = [
-        # Переименовываем Sheet1 → СКЛАД
-        {"updateSheetProperties": {
-            "properties": {"sheetId": default_sheet_id, "title": "СКЛАД"},
-            "fields": "title"
-        }},
-        # Создаём остальные листы
-        {"addSheet": {"properties": {"title": "ФИНАНСЫ"}}},
-        {"addSheet": {"properties": {"title": "ИСТОРИЯ"}}},
-        {"addSheet": {"properties": {"title": "ТОВАРЫ"}}},
-    ]
-
-    sheets_svc.spreadsheets().batchUpdate(
-        spreadsheetId=sid,
-        body={"requests": requests_body}
-    ).execute()
-
-    # Открываем через gspread и пишем заголовки
+    # 3. Открываем через gspread и пишем заголовки
     кн = гс.open_by_key(sid)
-
     склад   = кн.worksheet("СКЛАД")
     финансы = кн.worksheet("ФИНАНСЫ")
     история = кн.worksheet("ИСТОРИЯ")
@@ -135,7 +125,7 @@ def создать_таблицу(shop_name: str) -> str:
         value_input_option="USER_ENTERED"
     )
 
-    # Кэшируем
+    # 4. Кэшируем
     _кэш_листов[sid] = {
         "склад":   склад,
         "финансы": финансы,
@@ -143,7 +133,7 @@ def создать_таблицу(shop_name: str) -> str:
         "товары":  товары,
     }
 
-    лог.info("Таблица %s настроена для '%s'", sid, shop_name)
+    лог.info("Таблица %s полностью настроена для '%s'", sid, shop_name)
     return sid
 
 # ─────────────────────────────────────────────

@@ -63,55 +63,32 @@ def получить_листы(spreadsheet_id: str) -> dict:
 # ─────────────────────────────────────────────
 def создать_таблицу(shop_name: str) -> str:
     """
-    Создаёт таблицу через gspread (только Sheets API, без Drive API).
-    Возвращает spreadsheetId.
+    Копирует шаблон таблицы и возвращает spreadsheetId новой таблицы.
+    Копирование работает без Drive квоты сервисного аккаунта —
+    файл создаётся на Drive владельца шаблона (твоём личном).
     """
-    # Создаём через gspread — никакого Drive API, никаких квот
-    кн = гс.create(f"REESTOR — {shop_name}")
-    лог.info("Создана таблица %s для '%s'", кн.id, shop_name)
-
-    # Переименовываем первый лист в СКЛАД
-    лист1 = кн.sheet1
-    лист1.update_title("СКЛАД")
-
-    # Создаём остальные листы
-    кн.add_worksheet(title="ФИНАНСЫ", rows=1000, cols=20)
-    кн.add_worksheet(title="ИСТОРИЯ", rows=1000, cols=20)
-    кн.add_worksheet(title="ТОВАРЫ",  rows=1000, cols=5)
-
-    склад   = кн.worksheet("СКЛАД")
-    финансы = кн.worksheet("ФИНАНСЫ")
-    история = кн.worksheet("ИСТОРИЯ")
-    товары  = кн.worksheet("ТОВАРЫ")
-
-    # Заголовки
-    склад.append_row(
-        ["UID", "Дата", "Операция", "Поставка", "Товар", "Приход", "Расход", "Остаток"],
-        value_input_option="USER_ENTERED"
-    )
-    финансы.append_row(
-        ["UID", "Дата", "Операция", "Поставка", "Товар", "Сумма", "Комментарий"],
-        value_input_option="USER_ENTERED"
-    )
-    история.append_row(
-        ["UID", "Дата", "Операция", "Товар", "Цена", "Кол-во", "Поставка", "Клиент", "Прибыль"],
-        value_input_option="USER_ENTERED"
-    )
-    товары.append_row(
-        ["Каноническое название", "Синонимы"],
-        value_input_option="USER_ENTERED"
-    )
-
-    # Расшариваем таблицу владельцу — чтобы он видел её в своём Drive
+    ШАБЛОН_ID   = "1visnPEAgMm3A22eXl8mCn2Pkunr7N6afoTj1st5pmQI"
     OWNER_EMAIL = os.environ.get("OWNER_EMAIL", "")
+
+    # Копируем шаблон через gspread — файл появится на Drive владельца шаблона
+    кн_шаблон = гс.open_by_key(ШАБЛОН_ID)
+    новая_кн  = кн_шаблон.copy(title=f"REESTOR — {shop_name}")
+    sid = новая_кн.id
+    лог.info("Скопирована таблица %s для '%s'", sid, shop_name)
+
+    # Расшариваем владельцу если задан email
     if OWNER_EMAIL:
         try:
-            кн.share(OWNER_EMAIL, perm_type="user", role="writer")
+            новая_кн.share(OWNER_EMAIL, perm_type="user", role="writer")
             лог.info("Таблица расшарена на %s", OWNER_EMAIL)
         except Exception as e:
-            лог.warning("Не удалось расшарить таблицу: %s", e)
+            лог.warning("Не удалось расшарить: %s", e)
 
-    sid = кн.id
+    # Открываем листы
+    склад   = новая_кн.worksheet("СКЛАД")
+    финансы = новая_кн.worksheet("ФИНАНСЫ")
+    история = новая_кн.worksheet("ИСТОРИЯ")
+    товары  = новая_кн.worksheet("ТОВАРЫ")
 
     # Кэшируем
     _кэш_листов[sid] = {
@@ -121,7 +98,7 @@ def создать_таблицу(shop_name: str) -> str:
         "товары":  товары,
     }
 
-    лог.info("Таблица %s полностью настроена для '%s'", sid, shop_name)
+    лог.info("Таблица %s готова для '%s'", sid, shop_name)
     return sid
 
 # ─────────────────────────────────────────────

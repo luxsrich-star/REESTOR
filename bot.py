@@ -76,7 +76,11 @@ def создать_таблицу(shop_name: str) -> str:
         "mimeType": "application/vnd.google-apps.spreadsheet",
         "parents":  ["1l_2cJS1KcLCKFLa-QcWWfLSYd7TWj-1x"],  # папка на личном Drive
     }
-    файл = drive.files().create(body=meta, fields="id").execute()
+    файл = drive.files().create(
+        body=meta,
+        fields="id",
+        supportsAllDrives=True,
+    ).execute()
     sid  = файл["id"]
     лог.info("Создана таблица %s для магазина '%s'", sid, shop_name)
 

@@ -70,10 +70,9 @@ def создать_таблицу(shop_name: str) -> str:
     ШАБЛОН_ID   = "1visnPEAgMm3A22eXl8mCn2Pkunr7N6afoTj1st5pmQI"
     OWNER_EMAIL = os.environ.get("OWNER_EMAIL", "")
 
-    # Копируем шаблон через gspread — файл появится на Drive владельца шаблона
-    кн_шаблон = гс.open_by_key(ШАБЛОН_ID)
-    новая_кн  = кн_шаблон.copy(title=f"REESTOR — {shop_name}")
-    sid = новая_кн.id
+    # Копируем шаблон через Drive API (через gspread client)
+    sid = гс.copy(ШАБЛОН_ID, title=f"REESTOR — {shop_name}", copy_permissions=False)
+    новая_кн = гс.open_by_key(sid)
     лог.info("Скопирована таблица %s для '%s'", sid, shop_name)
 
     # Расшариваем владельцу если задан email

@@ -74,6 +74,7 @@ def создать_таблицу(shop_name: str) -> str:
     meta = {
         "name":     f"REESTOR — {shop_name}",
         "mimeType": "application/vnd.google-apps.spreadsheet",
+        "parents":  ["1l_2cJS1KcLCKFLa-QcWWfLSYd7TWj-1x"],  # папка на личном Drive
     }
     файл = drive.files().create(body=meta, fields="id").execute()
     sid  = файл["id"]
@@ -379,10 +380,9 @@ def удалить_по_uid(листы: dict, slug: str, uid: str) -> tuple[bool
 async def cmd_старт(update: Update, context: ContextTypes.DEFAULT_TYPE):
     чат = update.effective_chat.id
 
-    # Проверяем кэш бота
+    # 1. Проверяем кэш бота (быстро)
     кнт = получить_контекст(context.bot_data, чат)
     if кнт:
-        # Перепроверяем через сайт (актуальна ли привязка)
         рез = апи_check_telegram(кнт["slug"], чат)
         if рез.get("success"):
             await update.message.reply_text(
@@ -390,11 +390,11 @@ async def cmd_старт(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown", reply_markup=клавиатура())
             return
 
-    # Нет в кэше — начинаем авторизацию
+    # 2. Кэш пуст (рестарт бота) — просим slug чтобы восстановить сессию
     context.user_data.clear()
-    context.user_data["шаг"] = "slug"
+    context.user_data["шаг"] = "slug_restore"
     await update.message.reply_text(
-        "👋 Добро пожаловать в REESTOR!\n\nВведите *slug* вашего магазина:",
+        "👋 Введите *slug* вашего магазина для входа:",
         parse_mode="Markdown")
 
 async def обработать_сообщение(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -430,6 +430,39 @@ async def обработать_сообщение(update: Update, context: Conte
             получить_листы(кнт["spreadsheetId"]), кнт["slug"], текст)
         await update.message.reply_text(
             f"✅ Удалено: {сообщение}" if успех else f"❌ {сообщение}")
+        return
+
+    # ── Восстановление сессии после рестарта ────────────────────────────────
+    if шаг == "slug_restore":
+        slug = текст.strip().lower()
+        рез = апи_check_telegram(slug, чат)
+        if рез.get("success"):
+            sid       = рез.get("spreadsheetId")
+            shop_name = рез.get("shopName", slug)
+            if sid:
+                сохранить_контекст(context.bot_data, чат, slug, sid, shop_name)
+                context.user_data.clear()
+                await update.message.reply_text(
+                    f"✅ С возвращением! Магазин: *{shop_name}*",
+                    parse_mode="Markdown", reply_markup=клавиатура())
+            else:
+                # Магазин привязан но таблицы нет — создаём
+                await update.message.reply_text("⏳ Восстанавливаю таблицу...")
+                try:
+                    sid = создать_таблицу(shop_name)
+                    апи_bind_telegram(slug, чат, sid)
+                    сохранить_контекст(context.bot_data, чат, slug, sid, shop_name)
+                    context.user_data.clear()
+                    await update.message.reply_text(
+                        f"✅ Готово! Магазин: *{shop_name}*",
+                        parse_mode="Markdown", reply_markup=клавиатура())
+                except Exception as e:
+                    await update.message.reply_text(f"❌ Ошибка: {e}")
+        else:
+            # Не привязан — начинаем полную авторизацию
+            context.user_data["slug"] = slug
+            context.user_data["шаг"] = "access_code"
+            await update.message.reply_text("🔑 Введите код доступа (8 символов):")
         return
 
     # ── Авторизация ──────────────────────────────────────────────────────────

@@ -12,7 +12,7 @@ from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-from googleapiclient.discovery import build
+# googleapiclient не используется
 
 # ─────────────────────────────────────────────
 # Логирование
@@ -63,51 +63,28 @@ def получить_листы(spreadsheet_id: str) -> dict:
 # ─────────────────────────────────────────────
 def создать_таблицу(shop_name: str) -> str:
     """
-    Создаёт новую Google таблицу для магазина через Sheets API (без Drive квоты).
-    Таблица создаётся на Drive сервисного аккаунта, потом перемещается в папку владельца.
+    Создаёт таблицу через gspread (только Sheets API, без Drive API).
     Возвращает spreadsheetId.
     """
-    ПАПКА_ID = "1l_2cJS1KcLCKFLa-QcWWfLSYd7TWj-1x"
+    # Создаём через gspread — никакого Drive API, никаких квот
+    кн = гс.create(f"REESTOR — {shop_name}")
+    лог.info("Создана таблица %s для '%s'", кн.id, shop_name)
 
-    sheets_svc = build("sheets", "v4", credentials=_крред)
-    drive      = build("drive",  "v3", credentials=_крред)
+    # Переименовываем первый лист в СКЛАД
+    лист1 = кн.sheet1
+    лист1.update_title("СКЛАД")
 
-    # 1. Создаём таблицу через Sheets API — не занимает Drive квоту сервисного аккаунта
-    тело = {
-        "properties": {"title": f"REESTOR — {shop_name}"},
-        "sheets": [
-            {"properties": {"title": "СКЛАД"}},
-            {"properties": {"title": "ФИНАНСЫ"}},
-            {"properties": {"title": "ИСТОРИЯ"}},
-            {"properties": {"title": "ТОВАРЫ"}},
-        ]
-    }
-    сп = sheets_svc.spreadsheets().create(body=тело, fields="spreadsheetId").execute()
-    sid = сп["spreadsheetId"]
-    лог.info("Создана таблица %s для магазина '%s'", sid, shop_name)
+    # Создаём остальные листы
+    кн.add_worksheet(title="ФИНАНСЫ", rows=1000, cols=20)
+    кн.add_worksheet(title="ИСТОРИЯ", rows=1000, cols=20)
+    кн.add_worksheet(title="ТОВАРЫ",  rows=1000, cols=5)
 
-    # 2. Перемещаем в папку владельца
-    try:
-        файл = drive.files().get(fileId=sid, fields="parents").execute()
-        старые = ",".join(файл.get("parents", []))
-        drive.files().update(
-            fileId=sid,
-            addParents=ПАПКА_ID,
-            removeParents=старые,
-            supportsAllDrives=True,
-            fields="id,parents"
-        ).execute()
-        лог.info("Таблица %s перемещена в папку %s", sid, ПАПКА_ID)
-    except Exception as e:
-        лог.warning("Не удалось переместить таблицу в папку: %s", e)
-
-    # 3. Открываем через gspread и пишем заголовки
-    кн = гс.open_by_key(sid)
     склад   = кн.worksheet("СКЛАД")
     финансы = кн.worksheet("ФИНАНСЫ")
     история = кн.worksheet("ИСТОРИЯ")
     товары  = кн.worksheet("ТОВАРЫ")
 
+    # Заголовки
     склад.append_row(
         ["UID", "Дата", "Операция", "Поставка", "Товар", "Приход", "Расход", "Остаток"],
         value_input_option="USER_ENTERED"
@@ -125,7 +102,18 @@ def создать_таблицу(shop_name: str) -> str:
         value_input_option="USER_ENTERED"
     )
 
-    # 4. Кэшируем
+    # Расшариваем таблицу владельцу — чтобы он видел её в своём Drive
+    OWNER_EMAIL = os.environ.get("OWNER_EMAIL", "")
+    if OWNER_EMAIL:
+        try:
+            кн.share(OWNER_EMAIL, perm_type="user", role="writer")
+            лог.info("Таблица расшарена на %s", OWNER_EMAIL)
+        except Exception as e:
+            лог.warning("Не удалось расшарить таблицу: %s", e)
+
+    sid = кн.id
+
+    # Кэшируем
     _кэш_листов[sid] = {
         "склад":   склад,
         "финансы": финансы,

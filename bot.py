@@ -40,6 +40,7 @@ def keyboard():
     return ReplyKeyboardMarkup([
         [KeyboardButton("📦 Остатки"), KeyboardButton("💰 Прибыль")],
         [KeyboardButton("📋 История"), KeyboardButton("🗑 Удалить запись")],
+        [KeyboardButton("📖 Инструкция")],
     ], resize_keyboard=True)
 
 def get_ctx(bot_data, tg_id):
@@ -334,6 +335,10 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     step  = context.user_data.get("step")
 
     # Кнопки меню
+    if text == "📖 Инструкция":
+        await show_help(update)
+        return
+
     if text in ("📦 Остатки", "💰 Прибыль", "📋 История", "🗑 Удалить запись"):
         ctx = get_ctx(context.bot_data, tg_id)
         if not ctx:
@@ -471,6 +476,43 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg)
 
 # ── Просмотр ─────────────────────────────────────────────────────────────────
+
+async def show_help(update):
+    lines = [
+        "ИНСТРУКЦИЯ",
+        "",
+        "ПРОДАЖА:",
+        "Пиши: название цена [количество шт] [поставка N]",
+        "",
+        "Примеры:",
+        "Adrenaline Апельсин 450",
+        "адреналин апельсин 450 2шт поставка 3",
+        "DLTA мята 300 5шт поставка 1",
+        "",
+        "ЗАКУП:",
+        "Пиши слово закуп в начале:",
+        "закуп Adrenaline Апельсин 380 10шт поставка 2",
+        "",
+        "ВАЖНО:",
+        "- Название можно писать сокращённо или синонимами",
+        "  (синонимы в таблице, лист ТОВАРЫ)",
+        "- Цена — первое число в сообщении",
+        "- Количество — второе число (если не указано — 1 шт)",
+        "- Поставка — номер поставки (необязательно)",
+        "",
+        "КНОПКИ:",
+        "Остатки — текущие остатки на складе",
+        "Прибыль — общий баланс",
+        "История — последние 10 операций",
+        "Удалить запись — удалить операцию по UID",
+        "",
+        "УДАЛЕНИЕ:",
+        "1. Нажми Удалить запись",
+        "2. Скопируй UID из истории",
+        "3. Отправь его боту",
+        "Бот удалит запись и вернёт товар на склад.",
+    ]
+    await update.message.reply_text("\n".join(lines))
 
 async def show_stock(update, slug):
     try:

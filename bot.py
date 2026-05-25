@@ -1,8 +1,3 @@
-"""
-REESTOR — мультимагазинный бот
-Таблица создаётся вручную суперадмином через /settable
-"""
-
 import os, re, json, time, random, logging
 import requests
 from datetime import datetime
@@ -11,592 +6,540 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, Con
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
-# ─────────────────────────────────────────────
-# Логирование
-# ─────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-лог = logging.getLogger(__name__)
+log = logging.getLogger(__name__)
 
-# ─────────────────────────────────────────────
-# Конфигурация из переменных окружения
-# ─────────────────────────────────────────────
-ТОКЕН        = os.environ["TELEGRAM_TOKEN"]
-GOOGLE_KEY   = json.loads(os.environ["GDRIVE_CREDENTIALS"])
-САЙТ         = os.environ.get("SITE_URL", "https://b2bshopb2b.up.railway.app") + "/api/admin"
-SUPERADMIN   = int(os.environ.get("SUPERADMIN_TG_ID", "0"))  # твой Telegram ID
+TOKEN       = os.environ["TELEGRAM_TOKEN"]
+GOOGLE_KEY  = json.loads(os.environ["GDRIVE_CREDENTIALS"])
+SITE        = os.environ.get("SITE_URL", "https://b2bshopb2b.up.railway.app") + "/api/admin"
+SITE_BASE   = os.environ.get("SITE_URL", "https://b2bshopb2b.up.railway.app")
+SUPERADMIN  = int(os.environ.get("SUPERADMIN_TG_ID", "0"))
 
-# ─────────────────────────────────────────────
-# Google Sheets
-# ─────────────────────────────────────────────
-_SCOPE = [
-    "https://spreadsheets.google.com/feeds",
-    "https://www.googleapis.com/auth/drive",
-]
-_крред = ServiceAccountCredentials.from_json_keyfile_dict(GOOGLE_KEY, _SCOPE)
-гс     = gspread.authorize(_крред)
-_кэш_листов: dict = {}
+_SCOPE = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+_creds = ServiceAccountCredentials.from_json_keyfile_dict(GOOGLE_KEY, _SCOPE)
+gc     = gspread.authorize(_creds)
+_sheet_cache = {}
 
-def получить_листы(spreadsheet_id: str) -> dict:
-    if spreadsheet_id in _кэш_листов:
-        return _кэш_листов[spreadsheet_id]
-    кн = гс.open_by_key(spreadsheet_id)
-    листы = {
-        "склад":   кн.worksheet("СКЛАД"),
-        "финансы": кн.worksheet("ФИНАНСЫ"),
-        "история": кн.worksheet("ИСТОРИЯ"),
-        "товары":  кн.worksheet("ТОВАРЫ"),
+def get_sheets(sid):
+    if sid in _sheet_cache:
+        return _sheet_cache[sid]
+    wb = gc.open_by_key(sid)
+    sheets = {
+        "sklad":   wb.worksheet("СКЛАД"),
+        "finance": wb.worksheet("ФИНАНСЫ"),
+        "history": wb.worksheet("ИСТОРИЯ"),
+        "goods":   wb.worksheet("ТОВАРЫ"),
     }
-    _кэш_листов[spreadsheet_id] = листы
-    лог.info("Подключились к таблице %s", spreadsheet_id)
-    return листы
+    _sheet_cache[sid] = sheets
+    return sheets
 
-# ─────────────────────────────────────────────
-# Вспомогательные функции
-# ─────────────────────────────────────────────
-def генерировать_uid() -> str:
+def gen_uid():
     return f"{int(time.time()*1000)}_{random.randint(1000,9999)}"
 
-def клавиатура() -> ReplyKeyboardMarkup:
+def keyboard():
     return ReplyKeyboardMarkup([
         [KeyboardButton("📦 Остатки"), KeyboardButton("💰 Прибыль")],
         [KeyboardButton("📋 История"), KeyboardButton("🗑 Удалить запись")],
     ], resize_keyboard=True)
 
-def получить_контекст(bot_data: dict, telegram_id: int) -> dict | None:
-    return bot_data.get(f"shop_{telegram_id}")
+def get_ctx(bot_data, tg_id):
+    return bot_data.get(f"shop_{tg_id}")
 
-def сохранить_контекст(bot_data: dict, telegram_id: int, slug: str,
-                        spreadsheet_id: str, shop_name: str):
-    bot_data[f"shop_{telegram_id}"] = {
-        "slug":          slug,
-        "spreadsheetId": spreadsheet_id,
-        "shopName":      shop_name,
-    }
+def save_ctx(bot_data, tg_id, slug, sid, name):
+    bot_data[f"shop_{tg_id}"] = {"slug": slug, "sid": sid, "name": name}
 
-# ─────────────────────────────────────────────
-# API сайта
-# ─────────────────────────────────────────────
-def апи_check_telegram(slug: str, telegram_id: int) -> dict:
+# ── API ──────────────────────────────────────────────────────────────────────
+
+def api_check_tg(slug, tg_id):
     try:
-        r = requests.get(f"{САЙТ}/check-telegram",
-                         params={"slug": slug, "telegramId": telegram_id}, timeout=10)
+        r = requests.get(f"{SITE}/check-telegram",
+                         params={"slug": slug, "telegramId": tg_id}, timeout=10)
         if r.status_code == 200:
             return r.json()
     except Exception as e:
-        лог.error("check-telegram: %s", e)
+        log.error("check-telegram: %s", e)
     return {"success": False}
 
-def апи_check_bot_access(slug: str, access_code: str, verify_code: str) -> dict:
+def api_check_access(slug, ac, vc):
     try:
-        r = requests.get(f"{САЙТ}/check-bot-access",
-                         params={"slug": slug, "accessCode": access_code, "verifyCode": verify_code},
-                         timeout=10)
+        r = requests.get(f"{SITE}/check-bot-access",
+                         params={"slug": slug, "accessCode": ac, "verifyCode": vc}, timeout=10)
         if r.status_code == 200:
             return r.json()
     except Exception as e:
-        лог.error("check-bot-access: %s", e)
+        log.error("check-bot-access: %s", e)
     return {"success": False, "error": "network_error"}
 
-def апи_bind_telegram(slug: str, telegram_id: int, spreadsheet_id: str) -> dict:
+def api_bind(slug, tg_id, sid):
     try:
-        r = requests.post(f"{САЙТ}/bind-telegram",
-                          json={"shopSlug": slug, "telegramId": telegram_id,
-                                "spreadsheetId": spreadsheet_id},
+        r = requests.post(f"{SITE}/bind-telegram",
+                          json={"shopSlug": slug, "telegramId": tg_id, "spreadsheetId": sid},
                           headers={"Content-Type": "application/json"}, timeout=10)
         if r.status_code == 200:
             return r.json()
     except Exception as e:
-        лог.error("bind-telegram: %s", e)
+        log.error("bind-telegram: %s", e)
     return {"success": False}
 
-def апи_найти_товар(slug: str, название: str) -> dict:
+def api_find(slug, name):
     try:
-        r = requests.get(f"{САЙТ}/find-product",
-                         params={"shopSlug": slug, "productName": название}, timeout=10)
+        r = requests.get(f"{SITE}/find-product",
+                         params={"shopSlug": slug, "productName": name}, timeout=10)
         if r.status_code == 200:
-            д = r.json()
-            if д.get("found"):
-                return д
+            d = r.json()
+            if d.get("found"):
+                return d
     except Exception as e:
-        лог.error("find-product: %s", e)
+        log.error("find-product: %s", e)
     return {"found": False}
 
-def апи_обновить_остаток(slug: str, название: str, изменение: int) -> dict:
-    тело = {"shopSlug": slug, "productName": название, "quantityChange": изменение}
+def api_update(slug, name, change):
+    body = {"shopSlug": slug, "productName": name, "quantityChange": change}
     try:
-        r = requests.post(f"{САЙТ}/update-stock",
-                          data=json.dumps(тело, ensure_ascii=False).encode("utf-8"),
+        r = requests.post(f"{SITE}/update-stock",
+                          data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
                           headers={"Content-Type": "application/json; charset=utf-8"},
                           timeout=10)
         if r.status_code == 200:
             return r.json()
         return {"success": False, "error": f"http_{r.status_code}"}
     except Exception as e:
-        лог.error("update-stock: %s", e)
+        log.error("update-stock: %s", e)
         return {"success": False, "error": str(e)}
 
-def апи_каталог(slug: str) -> dict:
+def api_catalog(slug):
     try:
-        base = os.environ.get("SITE_URL", "https://b2bshopb2b.up.railway.app")
-        r = requests.get(f"{base}/api/shop/{slug}", timeout=10)
+        r = requests.get(f"{SITE_BASE}/api/shop/{slug}", timeout=10)
         if r.status_code == 200:
             return r.json()
     except Exception as e:
-        лог.error("catalog: %s", e)
+        log.error("catalog: %s", e)
     return {}
 
-# ─────────────────────────────────────────────
-# Парсинг сообщения
-# ─────────────────────────────────────────────
-def загрузить_синонимы(листы: dict) -> dict:
-    результат: dict = {}
+# ── Парсинг ──────────────────────────────────────────────────────────────────
+
+def load_synonyms(sheets):
+    result = {}
     try:
-        строки = листы["товары"].get_all_values()
-        for стр in строки[1:]:
-            if not стр or not стр[0].strip():
+        rows = sheets["goods"].get_all_values()
+        for row in rows[1:]:
+            if not row or not row[0].strip():
                 continue
-            канон = стр[0].strip()
-            результат[канон.lower()] = канон
-            if len(стр) > 1 and стр[1].strip():
-                for с in стр[1].split(","):
-                    с = с.strip()
-                    if с:
-                        результат[с.lower()] = канон
+            canon = row[0].strip()
+            result[canon.lower()] = canon
+            if len(row) > 1 and row[1].strip():
+                for s in row[1].split(","):
+                    s = s.strip()
+                    if s:
+                        result[s.lower()] = canon
     except Exception as e:
-        лог.error("загрузить_синонимы: %s", e)
-    return результат
+        log.error("load_synonyms: %s", e)
+    return result
 
-def найти_канон(текст: str, синонимы: dict) -> str | None:
-    тл = текст.lower().strip()
-    if тл in синонимы:
-        return синонимы[тл]
-    лучший, лучшая_длина = None, 0
-    for синоним, канон in синонимы.items():
-        if синоним in тл and len(синоним) > лучшая_длина:
-            лучший, лучшая_длина = канон, len(синоним)
-    return лучший
+def find_canon(text, synonyms):
+    tl = text.lower().strip()
+    if tl in synonyms:
+        return synonyms[tl]
+    best, best_len = None, 0
+    for syn, canon in synonyms.items():
+        if syn in tl and len(syn) > best_len:
+            best, best_len = canon, len(syn)
+    return best
 
-def разобрать_сообщение(текст: str, листы: dict) -> dict:
-    синонимы = загрузить_синонимы(листы)
-    текст = текст.strip()
-    операция = "Продажа"
-    if текст.lower().startswith("закуп"):
-        операция = "Закуп"
-        текст = текст[5:].strip()
+def parse_msg(text, sheets):
+    synonyms = load_synonyms(sheets)
+    text = text.strip()
+    op = "Продажа"
+    if text.lower().startswith("закуп"):
+        op = "Закуп"
+        text = text[5:].strip()
 
-    поставка = None
-    м = re.search(r'поставка\s+(\d+)', текст, re.IGNORECASE)
-    if м:
-        поставка = int(м.group(1))
-        текст = текст[:м.start()].strip()
+    delivery = None
+    m = re.search(r'поставка\s+(\d+)', text, re.IGNORECASE)
+    if m:
+        delivery = int(m.group(1))
+        text = text[:m.start()].strip()
 
-    числа = [int(м2.group(1)) for м2 in
-              re.finditer(r'\b(\d+)\s*(?:штук[иа]?|шт\.?)?\b', текст, re.IGNORECASE)]
-    цена       = числа[0] if числа else None
-    количество = числа[1] if len(числа) >= 2 else 1
+    nums = [int(m2.group(1)) for m2 in
+            re.finditer(r'\b(\d+)\s*(?:штук[иа]?|шт\.?)?\b', text, re.IGNORECASE)]
+    price = nums[0] if nums else None
+    qty   = nums[1] if len(nums) >= 2 else 1
 
-    название_сырое = re.sub(r'\b\d+\s*(?:штук[иа]?|шт\.?)?\b', '', текст, flags=re.IGNORECASE)
-    название_сырое = re.sub(r'\s{2,}', ' ', название_сырое).strip()
+    raw_name = re.sub(r'\b\d+\s*(?:штук[иа]?|шт\.?)?\b', '', text, flags=re.IGNORECASE)
+    raw_name = re.sub(r'\s{2,}', ' ', raw_name).strip()
 
-    канон = найти_канон(название_сырое, синонимы)
+    canon = find_canon(raw_name, synonyms)
     return {
-        "uid":          генерировать_uid(),
-        "операция":     операция,
-        "товар":        канон or название_сырое,
-        "канон_найден": канон is not None,
-        "цена":         цена,
-        "количество":   количество,
-        "поставка":     поставка,
+        "uid":      gen_uid(),
+        "op":       op,
+        "name":     canon or raw_name,
+        "found":    canon is not None,
+        "price":    price,
+        "qty":      qty,
+        "delivery": delivery,
     }
 
-# ─────────────────────────────────────────────
-# Запись в таблицу
-# ─────────────────────────────────────────────
-def записать_операцию(листы: dict, д: dict, сайт_данные: dict):
-    сег  = datetime.now().strftime("%d.%m.%Y")
-    uid  = д["uid"]
-    опер = д["операция"]
-    тов  = д["товар"]
-    кол  = д["количество"]
-    цена = д["цена"] or сайт_данные.get("price", 0)
-    себ  = сайт_данные.get("cost", 0)
-    пост = д["поставка"]
+# ── Таблица ──────────────────────────────────────────────────────────────────
 
-    все  = листы["склад"].get_all_values()
-    след = len(все) + 1
+def write_op(sheets, d, site_data):
+    today = datetime.now().strftime("%d.%m.%Y")
+    uid   = d["uid"]
+    op    = d["op"]
+    name  = d["name"]
+    qty   = d["qty"]
+    price = d["price"] or site_data.get("price", 0)
+    cost  = site_data.get("cost", 0)
+    deliv = d["delivery"]
 
-    if опер == "Продажа":
-        листы["склад"].append_row(
-            [uid, сег, "Продажа", пост, тов, 0, кол,
-             f"=SUM(F$2:F{след})-SUM(G$2:G{след})"],
+    all_rows = sheets["sklad"].get_all_values()
+    next_row = len(all_rows) + 1
+
+    if op == "Продажа":
+        sheets["sklad"].append_row(
+            [uid, today, "Продажа", deliv, name, 0, qty,
+             f"=SUM(F$2:F{next_row})-SUM(G$2:G{next_row})"],
             value_input_option="USER_ENTERED")
     else:
-        листы["склад"].append_row(
-            [uid, сег, "Закуп", пост, тов, кол, 0,
-             f"=SUM(F$2:F{след})-SUM(G$2:G{след})"],
+        sheets["sklad"].append_row(
+            [uid, today, "Закуп", deliv, name, qty, 0,
+             f"=SUM(F$2:F{next_row})-SUM(G$2:G{next_row})"],
             value_input_option="USER_ENTERED")
 
-    оборот = цена * кол
-    приб   = (цена - себ) * кол if себ else 0
-    if опер == "Продажа":
-        листы["финансы"].append_row(
-            [uid, сег, "Продажа", пост, тов, оборот, f"Прибыль: {приб}"])
+    turnover = price * qty
+    profit   = (price - cost) * qty if cost else 0
+    if op == "Продажа":
+        sheets["finance"].append_row([uid, today, "Продажа", deliv, name, turnover, f"Прибыль: {profit}"])
     else:
-        листы["финансы"].append_row(
-            [uid, сег, "Закуп", пост, тов, -(цена * кол), ""])
+        sheets["finance"].append_row([uid, today, "Закуп", deliv, name, -(price * qty), ""])
 
-    чистая = ((цена - себ) * кол) if (себ and опер == "Продажа") else ""
-    листы["история"].append_row([uid, сег, опер, тов, цена, кол, пост, "", чистая])
+    net = ((price - cost) * qty) if (cost and op == "Продажа") else ""
+    sheets["history"].append_row([uid, today, op, name, price, qty, deliv, "", net])
 
-def удалить_по_uid(листы: dict, slug: str, uid: str) -> tuple[bool, str]:
-    ист = листы["история"].get_all_values()
-    номер, инфо_оп, инфо_тов, инфо_кол = None, "", "", 1
-    for i, стр in enumerate(ист):
-        if стр and стр[0] == uid:
-            номер    = i + 1
-            инфо_оп  = стр[2] if len(стр) > 2 else ""
-            инфо_тов = стр[3] if len(стр) > 3 else ""
-            инфо_кол = int(стр[5]) if len(стр) > 5 and стр[5].isdigit() else 1
+def delete_uid(sheets, slug, uid):
+    hist = sheets["history"].get_all_values()
+    row_num, op, name, qty = None, "", "", 1
+    for i, row in enumerate(hist):
+        if row and row[0] == uid:
+            row_num = i + 1
+            op   = row[2] if len(row) > 2 else ""
+            name = row[3] if len(row) > 3 else ""
+            qty  = int(row[5]) if len(row) > 5 and row[5].isdigit() else 1
             break
-    if номер is None:
+    if row_num is None:
         return False, "UID не найден"
-    for л in ["склад", "финансы"]:
-        for i, стр in enumerate(листы[л].get_all_values()):
-            if стр and стр[0] == uid:
-                листы[л].delete_rows(i + 1)
+    for sheet_key in ["sklad", "finance"]:
+        for i, row in enumerate(sheets[sheet_key].get_all_values()):
+            if row and row[0] == uid:
+                sheets[sheet_key].delete_rows(i + 1)
                 break
-    листы["история"].delete_rows(номер)
-    изм = инфо_кол if инфо_оп == "Продажа" else -инфо_кол
-    апи_обновить_остаток(slug, инфо_тов, изм)
-    return True, инфо_тов
+    sheets["history"].delete_rows(row_num)
+    change = qty if op == "Продажа" else -qty
+    api_update(slug, name, change)
+    return True, name
 
-# ─────────────────────────────────────────────
-# Обработчики
-# ─────────────────────────────────────────────
-async def cmd_старт(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    чат = update.effective_chat.id
+# ── Handlers ─────────────────────────────────────────────────────────────────
 
-    # Проверяем кэш
-    кнт = получить_контекст(context.bot_data, чат)
-    if кнт:
-        рез = апи_check_telegram(кнт["slug"], чат)
-        if рез.get("success"):
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    tg_id = update.effective_chat.id
+    ctx = get_ctx(context.bot_data, tg_id)
+    if ctx:
+        res = api_check_tg(ctx["slug"], tg_id)
+        if res.get("success"):
             await update.message.reply_text(
-                f"👋 С возвращением! Магазин: *{кнт['shopName']}*",
-                parse_mode="Markdown", reply_markup=клавиатура())
+                f"С возвращением! Магазин: {ctx['name']}",
+                reply_markup=keyboard())
             return
-
-    # Кэш пуст — просим slug для восстановления или новой авторизации
     context.user_data.clear()
-    context.user_data["шаг"] = "slug_enter"
-    await update.message.reply_text(
-        "👋 Добро пожаловать в *REESTOR*!\n\nВведите slug вашего магазина:",
-        parse_mode="Markdown")
+    context.user_data["step"] = "slug_enter"
+    await update.message.reply_text("Добро пожаловать в REESTOR!\n\nВведите slug вашего магазина:")
 
 async def cmd_settable(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Только для суперадмина.
-    Использование: /settable <slug> <spreadsheet_id>
-    Привязывает таблицу к магазину и уведомляет клиента.
-    """
-    чат = update.effective_chat.id
-    if чат != SUPERADMIN:
-        await update.message.reply_text("❌ Нет доступа.")
+    tg_id = update.effective_chat.id
+    if tg_id != SUPERADMIN:
+        await update.message.reply_text("Нет доступа.")
+        return
+    args = context.args
+    if not args or len(args) < 2:
+        await update.message.reply_text("Использование: /settable <slug> <spreadsheet_id>")
         return
 
-    арги = context.args
-    if not арги or len(арги) < 2:
-        await update.message.reply_text(
-            "Использование:\n`/settable <slug> <spreadsheet_id>`",
-            parse_mode="Markdown")
-        return
+    slug = args[0].strip().lower()
+    sid  = args[1].strip()
 
-    slug  = арги[0].strip().lower()
-    sid   = арги[1].strip()
-
-    # Проверяем что таблица доступна
+    # Проверяем доступ к таблице
     try:
-        получить_листы(sid)
+        sheets = get_sheets(sid)
     except Exception as e:
-        await update.message.reply_text(f"❌ Не удалось открыть таблицу: {e}")
+        await update.message.reply_text(f"Не удалось открыть таблицу: {e}")
         return
 
-    # Ищем telegram_id клиента который ждёт таблицу
-    ждущий_id = context.bot_data.get(f"pending_{slug}")
+    # Заполняем ТОВАРЫ из каталога сайта автоматически
+    try:
+        catalog = api_catalog(slug)
+        products = catalog.get("products", [])
+        visible  = [p for p in products if not p.get("hidden")]
+        if visible:
+            goods_sheet = sheets["goods"]
+            all_rows = goods_sheet.get_all_values()
+            if len(all_rows) > 1:
+                goods_sheet.delete_rows(2, len(all_rows))
+            rows_to_add = [[p["name"], ""] for p in visible]
+            goods_sheet.append_rows(rows_to_add, value_input_option="USER_ENTERED")
+            log.info("Заполнено %d товаров для %s", len(rows_to_add), slug)
+    except Exception as e:
+        log.error("Заполнение ТОВАРЫ: %s", e)
+
+    # Ищем ожидающего клиента
+    waiting_id   = context.bot_data.get(f"pending_{slug}")
+    waiting_name = context.bot_data.get(f"pending_name_{slug}", slug)
 
     # Привязываем на сайте
-    рез = апи_bind_telegram(slug, ждущий_id or 0, sid)
+    api_bind(slug, waiting_id or 0, sid)
 
-    if ждущий_id:
-        сохранить_контекст(context.bot_data, ждущий_id, slug, sid,
-                           context.bot_data.get(f"pending_name_{slug}", slug))
+    if waiting_id:
+        save_ctx(context.bot_data, waiting_id, slug, sid, waiting_name)
         context.bot_data.pop(f"pending_{slug}", None)
         context.bot_data.pop(f"pending_name_{slug}", None)
-        # Уведомляем клиента
         try:
             await context.bot.send_message(
-                chat_id=ждущий_id,
-                text=f"✅ Ваш магазин *{slug}* подключён! Можете вносить продажи.",
-                parse_mode="Markdown",
-                reply_markup=клавиатура())
+                chat_id=waiting_id,
+                text=f"Ваш магазин {waiting_name} подключён! Можете вносить продажи.",
+                reply_markup=keyboard())
         except Exception as e:
-            лог.error("Не удалось уведомить клиента: %s", e)
+            log.error("Уведомление клиента: %s", e)
 
+    goods_count = len([p for p in api_catalog(slug).get("products", []) if not p.get("hidden")])
     await update.message.reply_text(
-        f"✅ Таблица `{sid}` привязана к магазину `{slug}`",
-        parse_mode="Markdown")
+        f"Таблица привязана к магазину {slug}.\n"
+        f"Товаров добавлено в ТОВАРЫ: {goods_count}")
 
 async def cmd_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает суперадмину список магазинов ожидающих таблицу."""
-    чат = update.effective_chat.id
-    if чат != SUPERADMIN:
+    tg_id = update.effective_chat.id
+    if tg_id != SUPERADMIN:
         return
-
-    ожидающие = [(k.replace("pending_", ""), v)
-                 for k, v in context.bot_data.items()
-                 if k.startswith("pending_") and not k.startswith("pending_name_")]
-
-    if not ожидающие:
-        await update.message.reply_text("✅ Нет магазинов ожидающих таблицу.")
+    waiting = [(k.replace("pending_", ""), v)
+               for k, v in context.bot_data.items()
+               if k.startswith("pending_") and not k.startswith("pending_name_")]
+    if not waiting:
+        await update.message.reply_text("Нет магазинов ожидающих таблицу.")
         return
+    text = "Ожидают таблицу:\n\n"
+    for slug, tg in waiting:
+        text += f"- {slug} (tg: {tg})\n/settable {slug} <spreadsheet_id>\n\n"
+    await update.message.reply_text(text)
 
-    текст = "📋 *Ожидают таблицу:*\n\n"
-    for slug, tg_id in ожидающие:
-        текст += f"• `{slug}` — tg_id: `{tg_id}`\n"
-    текст += "\nПривяжи таблицу командой:\n`/settable <slug> <spreadsheet_id>`"
-    await update.message.reply_text(текст, parse_mode="Markdown")
+async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    tg_id = update.effective_chat.id
+    text  = update.message.text.strip()
+    step  = context.user_data.get("step")
 
-async def обработать_сообщение(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    чат   = update.effective_chat.id
-    текст = update.message.text.strip()
-    шаг   = context.user_data.get("шаг")
-
-    # ── Кнопки меню ──────────────────────────────────────────────────────────
-    if текст in ("📦 Остатки", "💰 Прибыль", "📋 История", "🗑 Удалить запись"):
-        кнт = получить_контекст(context.bot_data, чат)
-        if not кнт:
+    # Кнопки меню
+    if text in ("📦 Остатки", "💰 Прибыль", "📋 История", "🗑 Удалить запись"):
+        ctx = get_ctx(context.bot_data, tg_id)
+        if not ctx:
             await update.message.reply_text("Введите /start для входа.")
             return
-        if текст == "📦 Остатки":
-            await показать_остатки(update, кнт["slug"])
-        elif текст == "💰 Прибыль":
-            await показать_прибыль(update, получить_листы(кнт["spreadsheetId"]))
-        elif текст == "📋 История":
-            await показать_историю(update, получить_листы(кнт["spreadsheetId"]))
-        elif текст == "🗑 Удалить запись":
-            context.user_data["шаг"] = "del_uid"
+        if text == "📦 Остатки":
+            await show_stock(update, ctx["slug"])
+        elif text == "💰 Прибыль":
+            await show_profit(update, get_sheets(ctx["sid"]))
+        elif text == "📋 История":
+            await show_history(update, get_sheets(ctx["sid"]))
+        elif text == "🗑 Удалить запись":
+            context.user_data["step"] = "del_uid"
             await update.message.reply_text("Введите UID операции:")
         return
 
-    # ── Удаление ──────────────────────────────────────────────────────────────
-    if шаг == "del_uid":
-        context.user_data.pop("шаг", None)
-        кнт = получить_контекст(context.bot_data, чат)
-        if not кнт:
+    # Удаление
+    if step == "del_uid":
+        context.user_data.pop("step", None)
+        ctx = get_ctx(context.bot_data, tg_id)
+        if not ctx:
             await update.message.reply_text("Введите /start для входа.")
             return
-        успех, сообщение = удалить_по_uid(
-            получить_листы(кнт["spreadsheetId"]), кнт["slug"], текст)
-        await update.message.reply_text(
-            f"✅ Удалено: {сообщение}" if успех else f"❌ {сообщение}")
+        ok, msg = delete_uid(get_sheets(ctx["sid"]), ctx["slug"], text)
+        await update.message.reply_text(f"Удалено: {msg}" if ok else f"Ошибка: {msg}")
         return
 
-    # ── Ввод slug (вход или восстановление) ──────────────────────────────────
-    if шаг == "slug_enter":
-        slug = текст.strip().lower()
-        # Проверяем — может уже привязан (восстановление после рестарта)
-        рез = апи_check_telegram(slug, чат)
-        if рез.get("success"):
-            sid       = рез.get("spreadsheetId")
-            shop_name = рез.get("shopName", slug)
+    # Ввод slug
+    if step == "slug_enter":
+        slug = text.strip().lower()
+        res  = api_check_tg(slug, tg_id)
+        if res.get("success"):
+            sid  = res.get("spreadsheetId")
+            name = res.get("shopName", slug)
             if sid:
-                сохранить_контекст(context.bot_data, чат, slug, sid, shop_name)
+                save_ctx(context.bot_data, tg_id, slug, sid, name)
                 context.user_data.clear()
                 await update.message.reply_text(
-                    f"✅ С возвращением! Магазин: *{shop_name}*",
-                    parse_mode="Markdown", reply_markup=клавиатура())
+                    f"С возвращением! Магазин: {name}",
+                    reply_markup=keyboard())
                 return
-        # Не привязан — начинаем авторизацию
         context.user_data["slug"] = slug
-        context.user_data["шаг"]  = "access_code"
-        await update.message.reply_text("🔑 Введите код доступа (8 символов):")
+        context.user_data["step"] = "access_code"
+        await update.message.reply_text("Введите код доступа (8 символов):")
         return
 
-    # ── Авторизация ──────────────────────────────────────────────────────────
-    if шаг == "access_code":
-        context.user_data["ac"]  = текст.strip()
-        context.user_data["шаг"] = "verify_code"
-        await update.message.reply_text("🔢 Введите код подтверждения (4 цифры):")
+    if step == "access_code":
+        context.user_data["ac"]   = text.strip()
+        context.user_data["step"] = "verify_code"
+        await update.message.reply_text("Введите код подтверждения (4 цифры):")
         return
 
-    if шаг == "verify_code":
+    if step == "verify_code":
         slug = context.user_data.get("slug", "")
         ac   = context.user_data.get("ac", "")
-        vc   = текст.strip()
-
-        рез = апи_check_bot_access(slug, ac, vc)
-        if not рез.get("success"):
+        res  = api_check_access(slug, ac, text.strip())
+        if not res.get("success"):
             context.user_data.clear()
             await update.message.reply_text(
-                f"❌ Ошибка: {рез.get('error','неизвестно')}. Начните заново: /start")
+                f"Ошибка: {res.get('error','неизвестно')}. Начните заново: /start")
             return
-
-        shop_name = рез.get("shopName", slug)
+        name = res.get("shopName", slug)
         context.user_data.clear()
-
-        # Сохраняем в список ожидающих таблицу
-        context.bot_data[f"pending_{slug}"]      = чат
-        context.bot_data[f"pending_name_{slug}"] = shop_name
-
-        # Уведомляем суперадмина
+        context.bot_data[f"pending_{slug}"]      = tg_id
+        context.bot_data[f"pending_name_{slug}"] = name
         if SUPERADMIN:
             try:
                 await context.bot.send_message(
                     chat_id=SUPERADMIN,
-                    text=(f"🆕 Новый магазин ждёт таблицу!\n\n"
-                          f"Магазин: *{shop_name}* (`{slug}`)\n"
-                          f"TG ID клиента: `{чат}`\n\n"
-                          f"1. Скопируй шаблон таблицы\n"
-                          f"2. Расшарь сервисному аккаунту\n"
-                          f"3. Отправь мне:\n"
-                          f"`/settable {slug} <spreadsheet_id>`"),
-                    parse_mode="Markdown")
+                    text=(f"Новый магазин ждёт таблицу!\n\n"
+                          f"Магазин: {name} ({slug})\n"
+                          f"TG ID: {tg_id}\n\n"
+                          f"Команда для привязки:\n"
+                          f"/settable {slug} <spreadsheet_id>"))
             except Exception as e:
-                лог.error("Уведомление суперадмину: %s", e)
-
+                log.error("Уведомление суперадмину: %s", e)
         await update.message.reply_text(
-            f"✅ Авторизация прошла успешно!\n\n"
-            f"⏳ Администратор получил уведомление и скоро подключит вашу таблицу.\n"
-            f"Вы получите сообщение когда всё будет готово.")
+            "Авторизация прошла успешно!\n\n"
+            "Администратор получил уведомление и скоро подключит вашу таблицу. "
+            "Вы получите сообщение когда всё будет готово.")
         return
 
-    # ── Основная логика: продажа / закуп ─────────────────────────────────────
-    кнт = получить_контекст(context.bot_data, чат)
-    if not кнт:
+    # Продажа / закуп
+    ctx = get_ctx(context.bot_data, tg_id)
+    if not ctx:
         await update.message.reply_text("Введите /start для входа.")
         return
 
-    slug  = кнт["slug"]
-    листы = получить_листы(кнт["spreadsheetId"])
-    данные = разобрать_сообщение(текст, листы)
+    slug   = ctx["slug"]
+    sheets = get_sheets(ctx["sid"])
+    parsed = parse_msg(text, sheets)
 
-    if not данные["товар"]:
-        await update.message.reply_text("❌ Не распознал название товара.")
+    if not parsed["name"]:
+        await update.message.reply_text("Не распознал название товара.")
         return
 
-    сайт = апи_найти_товар(slug, данные["товар"])
-    if not сайт.get("found"):
+    site = api_find(slug, parsed["name"])
+    if not site.get("found"):
         await update.message.reply_text(
-            f"❌ Товар «{данные['товар']}» не найден на сайте.\n"
+            f"Товар {parsed['name']} не найден на сайте.\n"
             f"Проверьте синонимы в листе ТОВАРЫ.")
         return
 
-    данные["товар"] = сайт.get("productName", данные["товар"])
-    if данные["цена"] is None:
-        данные["цена"] = сайт.get("price", 0)
+    parsed["name"] = site.get("productName", parsed["name"])
+    if parsed["price"] is None:
+        parsed["price"] = site.get("price", 0)
 
-    кол  = данные["количество"]
-    опер = данные["операция"]
-    изм  = -кол if опер == "Продажа" else кол
+    qty    = parsed["qty"]
+    op     = parsed["op"]
+    change = -qty if op == "Продажа" else qty
 
-    рез_сайт = апи_обновить_остаток(slug, данные["товар"], изм)
-    записать_операцию(листы, данные, сайт)
+    res_site = api_update(slug, parsed["name"], change)
+    write_op(sheets, parsed, site)
 
-    актуал  = апи_найти_товар(slug, данные["товар"])
-    остаток = актуал.get("currentStock", рез_сайт.get("newStock", "?"))
+    actual  = api_find(slug, parsed["name"])
+    stock   = actual.get("currentStock", res_site.get("newStock", "?"))
+    price   = parsed["price"]
+    cost    = site.get("cost", 0)
+    profit  = (price - cost) * qty if (cost and op == "Продажа") else None
+    em      = "💰" if op == "Продажа" else "📥"
 
-    цена = данные["цена"]
-    себ  = сайт.get("cost", 0)
-    приб = (цена - себ) * кол if (себ and опер == "Продажа") else None
-    эм   = "💰" if опер == "Продажа" else "📥"
+    msg = (f"{em} {op}: {parsed['name']}\n"
+           f"Цена: {price} руб x {qty} шт\n")
+    if parsed["delivery"]:
+        msg += f"Поставка: {parsed['delivery']}\n"
+    if op == "Продажа":
+        msg += f"Оборот: {price*qty} руб\n"
+        if profit is not None:
+            msg += f"Прибыль: {profit} руб\n"
+    msg += f"Остаток: {stock} шт"
 
-    ответ = (f"{эм} *{опер}*: {данные['товар']}\n"
-             f"💵 {цена} руб × {кол} шт\n")
-    if данные["поставка"]:
-        ответ += f"📋 Поставка: {данные['поставка']}\n"
-    if опер == "Продажа":
-        ответ += f"🛒 Оборот: {цена*кол} руб\n"
-        if приб is not None:
-            ответ += f"🟢 Прибыль: {приб} руб\n"
-    ответ += f"📦 Остаток: {остаток} шт"
+    if not res_site.get("success"):
+        msg += f"\nСайт не обновлён: {res_site.get('error','?')}"
 
-    if not рез_сайт.get("success"):
-        ответ += f"\n⚠️ Сайт не обновлён: {рез_сайт.get('error','?')}"
+    await update.message.reply_text(msg)
 
-    await update.message.reply_text(ответ, parse_mode="Markdown")
+# ── Просмотр ─────────────────────────────────────────────────────────────────
 
-# ─────────────────────────────────────────────
-# Просмотр
-# ─────────────────────────────────────────────
-async def показать_остатки(update: Update, slug: str):
+async def show_stock(update, slug):
     try:
-        д      = апи_каталог(slug)
-        товары = д.get("products", [])
-        кат    = {к["id"]: к["name"] for к in д.get("categories", [])}
-        группы: dict = {}
-        for т in товары:
-            if т.get("hidden"):
+        d        = api_catalog(slug)
+        products = d.get("products", [])
+        cats     = {c["id"]: c["name"] for c in d.get("categories", [])}
+        groups   = {}
+        for p in products:
+            if p.get("hidden"):
                 continue
-            заг = кат.get(т.get("categoryId", ""), "Другое")
-            группы.setdefault(заг, []).append(
-                f"• {т['name']} — {т['stock']} шт | {т.get('price',0)} руб")
-        if not группы:
-            await update.message.reply_text("📦 Склад пуст")
+            cat = cats.get(p.get("categoryId", ""), "Другое")
+            groups.setdefault(cat, []).append(
+                f"- {p['name']} — {p['stock']} шт | {p.get('price',0)} руб")
+        if not groups:
+            await update.message.reply_text("Склад пуст")
             return
-        ответ = "📦 *ОСТАТКИ:*\n"
-        for заг, стр in sorted(группы.items()):
-            ответ += f"\n📌 {заг}\n" + "\n".join(стр) + "\n"
-        await update.message.reply_text(ответ, parse_mode="Markdown")
+        text = "ОСТАТКИ:\n"
+        for cat, rows in sorted(groups.items()):
+            text += f"\n{cat}\n" + "\n".join(rows) + "\n"
+        await update.message.reply_text(text)
     except Exception as e:
-        лог.error("показать_остатки: %s", e)
-        await update.message.reply_text("⚠️ Не удалось загрузить остатки")
+        log.error("show_stock: %s", e)
+        await update.message.reply_text("Не удалось загрузить остатки")
 
-async def показать_прибыль(update: Update, листы: dict):
+async def show_profit(update, sheets):
     try:
-        строки = листы["финансы"].get_all_values()
-        итог = 0.0
-        for стр in строки[1:]:
-            if len(стр) > 5 and стр[5]:
+        rows  = sheets["finance"].get_all_values()
+        total = 0.0
+        for row in rows[1:]:
+            if len(row) > 5 and row[5]:
                 try:
-                    итог += float(стр[5])
+                    total += float(row[5])
                 except ValueError:
                     pass
-        await update.message.reply_text(f"💸 Баланс: {итог:,.0f} руб")
+        await update.message.reply_text(f"Баланс: {total:,.0f} руб")
     except Exception as e:
-        лог.error("показать_прибыль: %s", e)
-        await update.message.reply_text("⚠️ Не удалось получить данные")
+        log.error("show_profit: %s", e)
+        await update.message.reply_text("Не удалось получить данные")
 
-async def показать_историю(update: Update, листы: dict):
+async def show_history(update, sheets):
     try:
-        все   = листы["история"].get_all_values()
-        данные = [с for с in все[1:] if с and с[0]]
-        посл  = данные[-10:]
-        if not посл:
-            await update.message.reply_text("📋 История пуста")
+        all_rows = sheets["history"].get_all_values()
+        data     = [r for r in all_rows[1:] if r and r[0]]
+        last10   = data[-10:]
+        if not last10:
+            await update.message.reply_text("История пуста")
             return
-        ответ = "📋 *Последние операции:*\n\n"
-        for стр in reversed(посл):
-            uid  = стр[0]
-            дата = стр[1] if len(стр) > 1 else "?"
-            опер = стр[2] if len(стр) > 2 else "?"
-            тов  = стр[3] if len(стр) > 3 else "?"
-            цена = стр[4] if len(стр) > 4 else "?"
-            кол  = стр[5] if len(стр) > 5 else "?"
-            ответ += f"`{uid}`\n{дата} — {опер}: {тов}, {цена}р × {кол}шт\n\n"
-        ответ += "🗑 Удалить: кнопка *«Удалить запись»* → UID"
-        await update.message.reply_text(ответ, parse_mode="Markdown")
+        text = "Последние операции:\n\n"
+        for row in reversed(last10):
+            uid  = row[0]
+            date = row[1] if len(row) > 1 else "?"
+            op   = row[2] if len(row) > 2 else "?"
+            name = row[3] if len(row) > 3 else "?"
+            pr   = row[4] if len(row) > 4 else "?"
+            qty  = row[5] if len(row) > 5 else "?"
+            text += f"{uid}\n{date} — {op}: {name}, {pr}р x {qty}шт\n\n"
+        text += "Для удаления: кнопка Удалить запись -> UID"
+        await update.message.reply_text(text)
     except Exception as e:
-        лог.error("показать_историю: %s", e)
-        await update.message.reply_text("⚠️ Не удалось загрузить историю")
+        log.error("show_history: %s", e)
+        await update.message.reply_text("Не удалось загрузить историю")
 
-# ─────────────────────────────────────────────
-# Точка входа
-# ─────────────────────────────────────────────
+# ── Main ─────────────────────────────────────────────────────────────────────
+
 if __name__ == "__main__":
-    лог.info("🚀 REESTOR Multi запускается")
-    app = ApplicationBuilder().token(ТОКЕН).build()
-    app.add_handler(CommandHandler("start",    cmd_старт))
+    log.info("REESTOR Multi запускается")
+    app = ApplicationBuilder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start",    cmd_start))
     app.add_handler(CommandHandler("settable", cmd_settable))
     app.add_handler(CommandHandler("pending",  cmd_pending))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, обработать_сообщение))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_msg))
     app.run_polling()

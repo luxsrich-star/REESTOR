@@ -1,0 +1,41 @@
+{
+  "name": "reestor-backend",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "nest build",
+    "start": "node dist/main",
+    "start:dev": "nest start --watch",
+    "migration:run": "typeorm migration:run -d dist/database/data-source.js",
+    "migration:generate": "typeorm migration:generate -d dist/database/data-source.js"
+  },
+  "dependencies": {
+    "@nestjs/core": "^11.0.0",
+    "@nestjs/common": "^11.0.0",
+    "@nestjs/platform-express": "^11.0.0",
+    "@nestjs/jwt": "^11.0.0",
+    "@nestjs/passport": "^11.0.0",
+    "@nestjs/typeorm": "^11.0.0",
+    "@nestjs/bull": "^11.0.0",
+    "@nestjs/config": "^3.3.0",
+    "typeorm": "^0.3.20",
+    "pg": "^8.13.0",
+    "ioredis": "^5.4.0",
+    "bull": "^4.16.0",
+    "passport": "^0.7.0",
+    "passport-jwt": "^4.0.1",
+    "bcryptjs": "^2.4.3",
+    "class-validator": "^0.14.0",
+    "class-transformer": "^0.5.1",
+    "helmet": "^8.0.0",
+    "gramjs": "^2.25.0"
+  },
+  "devDependencies": {
+    "@nestjs/cli": "^11.0.0",
+    "@nestjs/schematics": "^11.0.0",
+    "typescript": "^5.7.0",
+    "@types/node": "^22.0.0",
+    "@types/passport-jwt": "^4.0.0",
+    "@types/bcryptjs": "^2.4.6"
+  }
+}

@@ -1,0 +1,77 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root[data-theme="dark"] {
+  --bg-primary: #0A0C10;
+  --bg-secondary: #0F1117;
+  --bg-tertiary: #141720;
+  --bg-card: #12151C;
+  --bg-input: #0E1118;
+  --bg-sidebar: #0D0F16;
+
+  --border-primary: rgba(255,255,255,0.07);
+  --border-secondary: rgba(255,255,255,0.04);
+  --border-card: rgba(255,255,255,0.06);
+  --border-accent: rgba(61,111,255,0.4);
+
+  --text-primary: #FFFFFF;
+  --text-secondary: rgba(255,255,255,0.55);
+  --text-tertiary: rgba(255,255,255,0.30);
+  --text-accent: #3D6FFF;
+  --text-success: #22C55E;
+  --text-error: #EF4444;
+
+  --accent-primary: #3D6FFF;
+  --accent-hover: #2952CC;
+  --accent-muted: rgba(61,111,255,0.15);
+  --accent-glow: rgba(61,111,255,0.3);
+
+  --status-online: #22C55E;
+  --status-offline: #EF4444;
+  --status-warning: #F59E0B;
+
+  --sidebar-active-bg: rgba(61,111,255,0.12);
+  --sidebar-width: 220px;
+  --topbar-height: 60px;
+  --bottombar-height: 72px;
+  --card-radius: 14px;
+  --button-radius: 14px;
+  --input-radius: 12px;
+}
+
+:root[data-theme="light"] {
+  --bg-primary: #F0F2F5;
+  --bg-secondary: #FFFFFF;
+  --bg-card: #FFFFFF;
+  --bg-input: #F5F6F8;
+  --border-card: rgba(0,0,0,0.06);
+  --border-primary: rgba(0,0,0,0.08);
+  --text-primary: #0A0C10;
+  --text-secondary: rgba(0,0,0,0.55);
+  --text-tertiary: rgba(0,0,0,0.30);
+  --text-accent: #2952CC;
+  --accent-primary: #2952CC;
+  --accent-hover: #1E3FA8;
+  --accent-muted: rgba(41,82,204,0.1);
+}
+
+* {
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Inter", sans-serif;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  overscroll-behavior: none;
+}
+
+::-webkit-scrollbar { width: 0; }
